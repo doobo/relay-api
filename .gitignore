@@ -1,0 +1,18 @@
+# Runtime state: SQLite database, WAL files and the generated encryption key.
+/data/
+
+# Compiled binary.
+/relay-api
+/relay-api.exe
+
+# Local environment overrides.
+.env
+
+# Go build/test artifacts.
+*.test
+*.out
+/coverage.html
+
+# 发布包（make release 产物）
+/dist/
+task.md

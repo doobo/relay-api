@@ -1,0 +1,494 @@
+/* Page shell: login view, header, tab bar, main content. */
+
+/* Signed-out view: a single centered card, no app chrome around it. */
+.login-view {
+  position: relative;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 100vh;
+  min-height: 100dvh;
+  padding: 24px;
+}
+
+/* Soft accent halo behind the card, so the sign-in page does not read as a
+   bare form floating in the dark. Painted before the card in DOM order and
+   behind it because .login-card is positioned too. */
+.login-view::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  margin: auto;
+  width: min(680px, 92vw);
+  height: min(440px, 70vh);
+  background: radial-gradient(closest-side, var(--accent-soft), transparent);
+  pointer-events: none;
+}
+
+/* The appearance picker is pinned to the page corner here; with the app shell
+   visible the same control lives in the header. */
+.login-view .theme-select {
+  position: absolute;
+  top: 24px;
+  right: 24px;
+  z-index: 1;
+}
+
+.login-card {
+  position: relative;
+  display: grid;
+  gap: 10px;
+  width: min(360px, 100%);
+  /* Shorter bottom padding: the reserved message line below the button pays
+     for that space, so the card keeps its overall proportions. */
+  padding: 26px 24px 16px;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  box-shadow: 0 24px 60px var(--shadow);
+}
+
+/* Icon and title share one row here; the subtitle sits beneath the pair. */
+.login-brand {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+/* A step larger than the header mark: on this page the brand is the visual
+   anchor rather than a piece of chrome. */
+.login-card .brand-mark {
+  width: 30px;
+  height: 30px;
+}
+
+.login-card h1 {
+  font-size: 20px;
+  letter-spacing: -0.01em;
+}
+
+.login-subtitle {
+  font-size: 13px;
+  color: var(--muted);
+  margin-top: -4px;
+  margin-bottom: 4px;
+}
+
+.login-card input {
+  width: 100%;
+}
+
+.login-card button[type="submit"] {
+  width: 100%;
+  margin-top: 6px;
+  padding: 10px 12px;
+}
+
+/* The reserved line under the login button. Scoped to the card so it also
+   wins over the generic `.notice` rules in components.css, which load later.
+   `display: block !important` and the visibility toggle deliberately
+   neutralise the `.hidden` utility: the line must keep its height while empty,
+   otherwise the card grows and shifts under the cursor the moment a sign-in
+   attempt fails.
+   Two lines are reserved because the real messages ("Login failed: 401:
+   Invalid username or password", the insecure-context warning) wrap to two at
+   this width; that keeps the card exactly the same height either way. */
+.login-card .login-notice {
+  display: block !important;
+  min-height: 2.4em;
+  margin: 0;
+  font-size: 13px;
+  color: var(--muted);
+}
+
+.login-card .login-notice.hidden {
+  visibility: hidden;
+}
+
+/* Set by core/notice.js when the message is a failure, not a status. */
+.login-card .login-notice.error {
+  color: var(--danger);
+}
+
+/* ----------------------------------------------------------------- header */
+
+.app-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--gap);
+  padding: 10px 24px;
+  border-bottom: 1px solid var(--border);
+  background: var(--header-bg);
+  backdrop-filter: blur(8px);
+}
+
+.brand {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+}
+
+/* The product mark is the favicon artwork itself (upstream routes converging
+   on one gateway node), so the header matches the browser tab. Its dark plate
+   and rounded corners come from the SVG, which is why no background or border
+   radius is set here. */
+.brand-mark {
+  flex: none;
+  width: 26px;
+  height: 26px;
+  display: block;
+}
+
+.app-header h1 {
+  font-size: 18px;
+  white-space: nowrap;
+}
+
+/* The title doubles as a refresh control for the visible tab. */
+.app-title {
+  cursor: pointer;
+  user-select: none;
+  border-radius: var(--radius-sm);
+  transition: color 140ms ease;
+}
+
+.app-title:hover {
+  color: var(--accent);
+}
+
+.app-title:active {
+  opacity: 0.65;
+}
+
+.app-title:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 3px;
+}
+
+.header-actions {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex: none;
+}
+
+/* Appearance picker: the palette itself lives in base.css, this only selects
+   it (see core/theme.js). */
+.theme-select {
+  padding: 6px 8px;
+  background: var(--panel-alt);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  color: var(--muted);
+  font-size: 13px;
+  cursor: pointer;
+}
+
+.theme-select:hover {
+  border-color: var(--border-strong);
+  color: var(--text);
+}
+
+.user-name {
+  font-size: 13px;
+  color: var(--muted);
+}
+
+/* The username opens a small menu with the account actions, so the header
+   stays a single row on every screen size. */
+.user-menu {
+  position: relative;
+}
+
+.user-menu-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  background: transparent;
+  border: 1px solid var(--border);
+  color: var(--text);
+}
+
+.user-menu-toggle:hover {
+  background: var(--panel-alt);
+  border-color: var(--border-strong);
+}
+
+.user-menu-toggle .caret {
+  font-size: 10px;
+  color: var(--muted);
+}
+
+.user-menu-panel {
+  position: absolute;
+  right: 0;
+  top: calc(100% + 6px);
+  z-index: 20;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 180px;
+  padding: 6px;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  box-shadow: 0 10px 30px var(--shadow-lg);
+}
+
+.user-menu-panel button {
+  width: 100%;
+  padding: 9px 12px;
+  background: none;
+  border: none;
+  border-radius: var(--radius-sm);
+  color: var(--text);
+  font-size: 13px;
+  text-align: left;
+}
+
+.user-menu-panel button:hover {
+  background: var(--panel-alt);
+  filter: none;
+}
+
+.user-menu-panel button.danger {
+  background: none;
+  color: var(--danger);
+}
+
+.user-menu-panel button.danger:hover {
+  background: var(--danger-soft);
+}
+
+/* ------------------------------------------------------------------- tabs */
+
+.tabs {
+  display: flex;
+  gap: 4px;
+  padding: 12px 24px 0;
+  border-bottom: 1px solid var(--border);
+  background: var(--panel);
+  overflow-x: auto;
+  scrollbar-width: none;
+  -webkit-overflow-scrolling: touch;
+}
+
+.tabs::-webkit-scrollbar {
+  display: none;
+}
+
+.tabs button {
+  flex: 0 0 auto;
+  background: none;
+  border: none;
+  border-radius: 0;
+  border-bottom: 2px solid transparent;
+  color: var(--muted);
+  padding: 10px 14px;
+  cursor: pointer;
+  font-size: 14px;
+  transition: color 140ms ease, border-color 140ms ease;
+}
+
+.tabs button:hover {
+  background: none;
+  color: var(--text);
+}
+
+.tabs button.active {
+  color: var(--text);
+  border-bottom-color: var(--accent);
+  font-weight: 600;
+}
+
+/* ------------------------------------------------------------------- main */
+
+main {
+  padding: 24px;
+  /* The content spreads across wide screens (tables and the dashboard grid
+     used to stop at 1200px, leaving large empty gutters on a monitor) while
+     still keeping a readable measure on ultrawide displays. */
+  max-width: 1600px;
+  margin: 0 auto;
+}
+
+.tab {
+  display: none;
+}
+
+.tab.active {
+  display: block;
+}
+
+/* Every panel is a raised surface, the same one the dashboard tiles and the
+   login card use: one background, one border, one elevation token. */
+.panel {
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 18px;
+  box-shadow: var(--shadow-card);
+}
+
+.panel + .panel {
+  margin-top: 28px;
+}
+
+h2 {
+  font-size: 12px;
+  color: var(--muted);
+  margin: 0 0 12px;
+  text-transform: uppercase;
+  letter-spacing: 0.07em;
+  font-weight: 600;
+}
+
+/* Gradient square in front of a panel title, echoing the header brand mark so
+   the shell and the content share one visual language. */
+.panel h2::before {
+  content: "";
+  display: inline-block;
+  width: 7px;
+  height: 7px;
+  margin-right: 8px;
+  border-radius: 2px;
+  background: linear-gradient(140deg, var(--accent), var(--accent-strong));
+  vertical-align: middle;
+}
+
+/* Panel title with an action button (e.g. the create dialog trigger). */
+.panel-head {
+  position: relative; /* anchors the info popover below the head */
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--gap);
+  margin-bottom: 12px;
+}
+
+.panel-head h2 {
+  margin: 0;
+}
+
+/* Right-hand side of a panel head: the action button plus, when the panel has
+   an explanation, the info icon (see bindInfoPopover in core/dom.js). */
+.panel-head-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+/* Footer row of a panel: paging controls left, status text right. */
+.panel-foot {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--gap);
+  margin-top: 10px;
+}
+
+.panel-foot .hint {
+  margin: 0;
+  text-align: right;
+}
+
+.cards {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+  gap: var(--gap);
+  margin-bottom: 28px;
+}
+
+.card {
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 16px;
+  box-shadow: var(--shadow-card);
+}
+
+.card-label {
+  font-size: 12px;
+  color: var(--muted);
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+
+.card-value {
+  font-size: 26px;
+  font-weight: 600;
+  margin-top: 8px;
+  font-variant-numeric: tabular-nums;
+  letter-spacing: -0.01em;
+}
+
+/* --------------------------------------------------------- responsive */
+
+@media (max-width: 720px) {
+  /* Title and account menu stay on one row: the username may truncate, but
+     the menu never wraps onto its own line. */
+  .app-header {
+    flex-wrap: nowrap;
+    align-items: center;
+    padding: 10px 16px;
+    gap: 8px;
+  }
+
+  .app-header h1 {
+    font-size: 15px;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+
+  .brand-mark {
+    width: 22px;
+    height: 22px;
+  }
+
+  .user-name {
+    max-width: 30vw;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .tabs {
+    position: sticky;
+    top: 0;
+    z-index: 5;
+    padding: 8px 12px 0;
+  }
+
+  .tabs button {
+    padding: 12px 12px;
+  }
+
+  main {
+    padding: 16px;
+  }
+
+  .panel + .panel {
+    margin-top: 22px;
+  }
+
+  .cards {
+    grid-template-columns: repeat(auto-fit, minmax(130px, 1fr));
+    margin-bottom: 22px;
+  }
+
+  .card {
+    padding: 12px;
+  }
+
+  .card-value {
+    font-size: 22px;
+  }
+
+  .login-view .theme-select {
+    top: 16px;
+    right: 16px;
+  }
+}

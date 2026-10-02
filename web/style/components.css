@@ -1,0 +1,735 @@
+/* Buttons, forms, tables, dialogs, banners, badges. */
+
+/* -------------------------------------------------------------- buttons */
+
+button {
+  background: var(--accent);
+  border: 1px solid transparent;
+  color: var(--on-accent);
+  border-radius: var(--radius-sm);
+  padding: 7px 12px;
+  cursor: pointer;
+  font-size: 13px;
+  line-height: 1.4;
+  transition: background 120ms ease, border-color 120ms ease, color 120ms ease;
+}
+
+button:hover {
+  background: var(--accent-strong);
+}
+
+button:active {
+  transform: translateY(1px);
+}
+
+button:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+  transform: none;
+}
+
+button.secondary {
+  background: transparent;
+  border: 1px solid var(--border);
+  color: var(--text);
+}
+
+button.secondary:hover {
+  background: var(--panel-alt);
+  border-color: var(--border-strong);
+  filter: none;
+}
+
+button.danger {
+  background: var(--danger);
+  color: var(--on-danger);
+}
+
+button.danger:hover {
+  background: var(--danger-strong);
+}
+
+button.small {
+  padding: 4px 9px;
+  font-size: 12px;
+}
+
+.row-actions {
+  display: inline-flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+/* Round "i" button that reveals an explanation popover (core/dom.js
+   bindInfoPopover). */
+.icon-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 26px;
+  height: 26px;
+  padding: 0;
+  background: transparent;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  color: var(--muted);
+  font-size: 13px;
+  font-weight: 700;
+  line-height: 1;
+}
+
+.icon-btn:hover {
+  background: var(--panel-alt);
+  border-color: var(--border-strong);
+  color: var(--text);
+  filter: none;
+}
+
+.icon-btn[aria-expanded="true"] {
+  background: var(--accent-soft);
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+/* Explanation behind that icon: anchored under the panel head, out of the page
+   flow, so it only takes space while it is open. */
+.info-pop {
+  position: absolute;
+  top: calc(100% + 8px);
+  right: 0;
+  z-index: 30;
+  display: grid;
+  gap: 8px;
+  width: min(460px, 100%);
+  padding: 14px 16px;
+  background: var(--panel);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius);
+  box-shadow: 0 16px 40px var(--shadow-lg);
+}
+
+/* The hints keep their typography but drop the stacking margins: the grid gap
+   spaces them instead. */
+.info-pop .hint {
+  margin: 0;
+}
+
+/* Collapsible section toggle: the caret flips when the form is expanded. */
+.collapse-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.collapse-toggle .caret {
+  font-size: 10px;
+  color: var(--muted);
+  transition: transform 180ms ease;
+}
+
+.collapse-toggle[aria-expanded="true"] .caret {
+  transform: rotate(180deg);
+}
+
+/* ---------------------------------------------------------------- forms */
+
+.form-inline,
+.form-grid {
+  margin-bottom: 14px;
+}
+
+.form-inline {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.form-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(280px, 1fr));
+  gap: 8px;
+}
+
+.form-inline input,
+.form-inline select,
+.form-grid input,
+.form-grid select,
+.login-card input,
+dialog input,
+dialog select {
+  padding: 8px 10px;
+  background: var(--input-bg);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  color: var(--text);
+  font-size: 13px;
+  min-width: 0;
+  transition: border-color 120ms ease, background 120ms ease;
+}
+
+.form-inline input::placeholder,
+.form-grid input::placeholder,
+.login-card input::placeholder,
+dialog input::placeholder {
+  color: var(--placeholder);
+}
+
+.form-inline input:hover,
+.form-inline select:hover,
+.form-grid input:hover,
+.form-grid select:hover,
+.login-card input:hover,
+dialog input:hover,
+dialog select:hover {
+  border-color: var(--border-strong);
+}
+
+.form-inline input:focus,
+.form-inline select:focus,
+.form-grid input:focus,
+.form-grid select:focus,
+.login-card input:focus,
+dialog input:focus,
+dialog select:focus {
+  border-color: var(--accent);
+  outline: none;
+  box-shadow: 0 0 0 3px var(--accent-soft);
+}
+
+.form-inline input {
+  width: 220px;
+}
+
+/* A hint inside a flex/grid form gets its own full-width row. */
+.form-inline .hint,
+.form-grid .hint {
+  flex: 1 1 100%;
+  grid-column: 1 / -1;
+  margin-top: 2px;
+}
+
+.form-inline input[type="number"] {
+  width: 110px;
+}
+
+.form-grid button[type="submit"] {
+  justify-self: start;
+}
+
+.check-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 13px;
+  color: var(--muted);
+}
+
+.check-row input {
+  accent-color: var(--accent);
+}
+
+/* Labeled dialog field: caption above the control. */
+.field {
+  display: grid;
+  gap: 4px;
+}
+
+.field > span {
+  font-size: 12px;
+  color: var(--muted);
+}
+
+.field-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+}
+
+/* Grouped fields (e.g. the quota limits) with their own caption. */
+dialog fieldset {
+  display: grid;
+  gap: 10px;
+  margin: 0;
+  padding: 12px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+}
+
+dialog legend {
+  padding: 0 4px;
+  font-size: 12px;
+  color: var(--muted);
+}
+
+/* ------------------------------------------------------------- info list */
+
+.info-list {
+  display: grid;
+  gap: 6px;
+  margin: 0 0 14px;
+}
+
+.info-list > div {
+  display: flex;
+  gap: 10px;
+  font-size: 13px;
+}
+
+.info-list dt {
+  flex: 0 0 auto;
+  min-width: 110px;
+  color: var(--muted);
+}
+
+.info-list dd {
+  margin: 0;
+}
+
+/* ------------------------------------------------------- tags and badges */
+
+/* Inline label hanging off a value, e.g. the wildcard kind of an API-config
+   name (`api/**` -> "subtree"). */
+.tag,
+.badge {
+  display: inline-block;
+  padding: 1px 8px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: var(--code-bg);
+  color: var(--muted);
+  font-size: 11px;
+  line-height: 1.7;
+  vertical-align: middle;
+  white-space: nowrap;
+}
+
+.tag {
+  margin-left: 6px;
+}
+
+.tag.wildcard {
+  border-color: var(--accent);
+  background: var(--accent-soft);
+  color: var(--accent);
+}
+
+/* Mount point of an API config, shown before the name: /open requires an API
+   key, /free is public, so the colour difference carries the access model. */
+.config-name .tag:first-child {
+  margin-left: 0;
+}
+
+.config-name .tag.route-open {
+  background: var(--panel-alt);
+  color: var(--muted);
+}
+
+.config-name .tag.route-free {
+  border-color: transparent;
+  background: var(--ok-soft);
+  color: var(--ok);
+  font-weight: 600;
+}
+
+.badge {
+  font-family: var(--mono);
+  font-weight: 600;
+  letter-spacing: 0.02em;
+}
+
+.badge.on {
+  border-color: transparent;
+  background: var(--ok-soft);
+  color: var(--ok);
+}
+
+.badge.off {
+  border-color: transparent;
+  background: var(--danger-soft);
+  color: var(--danger);
+}
+
+/* HTTP status pill: the colour carries the outcome, the text the code. */
+.pill {
+  display: inline-flex;
+  align-items: center;
+  padding: 2px 9px;
+  border-radius: 999px;
+  background: var(--panel-alt);
+  color: var(--muted);
+  font-family: var(--mono);
+  font-size: 11.5px;
+  font-weight: 600;
+  line-height: 1.7;
+  font-variant-numeric: tabular-nums;
+}
+
+.pill.status-2xx {
+  background: var(--ok-soft);
+  color: var(--ok);
+}
+
+.pill.status-3xx {
+  background: var(--warn-soft);
+  color: var(--warn);
+}
+
+.pill.status-4xx,
+.pill.status-5xx,
+/* The request failed before an upstream status existed (network error, cap). */
+.pill.status-err {
+  background: var(--danger-soft);
+  color: var(--danger);
+}
+
+/* Server-rendered ids, request ids and masked secrets read as code. */
+.mono {
+  font-family: var(--mono);
+  font-size: 12.5px;
+}
+
+/* Upstream URLs in the usage tables: monospace so they scan as one value, and
+   broken anywhere so a long one wraps inside its column instead of widening
+   the whole table. */
+.cell-mono {
+  font-family: var(--mono);
+  font-size: 12.5px;
+  word-break: break-all;
+}
+
+/* --------------------------------------------------------------- tables */
+
+.table-wrap {
+  width: 100%;
+  overflow-x: auto;
+}
+
+/* API-config name: wildcard patterns are shown as code so the `*` reads as a
+   path token rather than a typo. */
+.config-name code {
+  padding: 1px 5px;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  background: var(--code-bg);
+  font-size: 12px;
+}
+
+table {
+  width: 100%;
+  border-collapse: collapse;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  overflow: hidden;
+  font-size: 13px;
+}
+
+/* Inside a panel the panel itself is the frame: the table drops its own border
+   and surface so the two do not read as nested boxes. */
+.panel table {
+  background: transparent;
+  border: none;
+  border-radius: 0;
+}
+
+th,
+td {
+  text-align: left;
+  padding: 9px 12px;
+  border-bottom: 1px solid var(--border);
+}
+
+th {
+  color: var(--muted);
+  font-weight: 600;
+  font-size: 11.5px;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+}
+
+tr:last-child td {
+  border-bottom: none;
+}
+
+tbody tr {
+  transition: background 120ms ease;
+}
+
+tbody tr:hover {
+  background: var(--row-hover);
+}
+
+/* Single-cell placeholder row for empty lists and load failures. */
+td.cell-message {
+  padding: 26px 12px;
+  text-align: center;
+  color: var(--muted);
+}
+
+td.cell-message.error {
+  color: var(--danger);
+}
+
+/* ------------------------------------------------------------ dialogs */
+
+dialog {
+  background: var(--panel);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 20px;
+  width: min(560px, 92vw);
+  max-height: 88vh;
+  overflow-y: auto;
+  box-shadow: 0 24px 60px var(--shadow-lg);
+}
+
+dialog::backdrop {
+  background: var(--backdrop);
+  backdrop-filter: blur(2px);
+}
+
+dialog h3 {
+  margin: 0 0 12px;
+  font-size: 15px;
+}
+
+dialog form {
+  display: grid;
+  gap: 10px;
+}
+
+dialog .dialog-actions {
+  display: flex;
+  gap: 8px;
+  justify-content: flex-end;
+  flex-wrap: wrap;
+}
+
+/* ------------------------------------------------------------ banners */
+
+.banner {
+  background: var(--accent-soft);
+  border: 1px solid var(--accent);
+  border-radius: 8px;
+  padding: 10px 14px;
+  margin: 12px 0;
+  font-size: 13px;
+}
+
+.banner.danger {
+  background: var(--danger-soft);
+  border-color: var(--danger);
+  color: var(--danger);
+}
+
+/* Generated password, shown once and selected as a whole on click so it can be
+   copied without partial selections off the ends. */
+.pw-result {
+  margin: 0;
+}
+
+.pw-result code {
+  display: block;
+  padding: 8px 12px;
+  background: var(--code-bg);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  font-size: 15px;
+  text-align: center;
+  user-select: all;
+  word-break: break-all;
+}
+
+/* Inline error slot injected into a form by core/notice.js. */
+.notice {
+  margin: 0;
+  font-size: 12px;
+}
+
+/* Same, but for a form that lays its fields out with flex/grid: it needs its
+   own full-width row instead of squeezing between two fields. */
+.form-inline .notice,
+.form-grid .notice {
+  flex: 1 1 100%;
+  grid-column: 1 / -1;
+}
+
+/* Toast for errors that have no form to sit in (row actions). */
+.toast {
+  position: fixed;
+  right: 16px;
+  bottom: 16px;
+  z-index: 100;
+  max-width: min(380px, calc(100vw - 32px));
+  padding: 10px 14px;
+  border: 1px solid var(--danger);
+  border-radius: var(--radius-sm);
+  background: var(--panel);
+  color: var(--danger);
+  font-size: 13px;
+  box-shadow: 0 10px 30px var(--shadow-lg);
+  opacity: 0;
+  transform: translateY(6px);
+  transition: opacity 160ms ease, transform 160ms ease;
+  pointer-events: none;
+  cursor: pointer;
+}
+
+.toast.visible {
+  opacity: 1;
+  transform: none;
+  pointer-events: auto;
+}
+
+.toast.info {
+  border-color: var(--accent);
+  color: var(--text);
+}
+
+/* --------------------------------------------------------- responsive */
+
+@media (max-width: 720px) {
+  .form-inline,
+  .form-grid {
+    grid-template-columns: 1fr;
+    gap: 10px;
+  }
+
+  .form-inline input,
+  .form-inline input[type="number"],
+  .form-inline select,
+  .form-grid input,
+  .form-grid select {
+    width: 100%;
+  }
+
+  .form-inline button,
+  .form-grid button {
+    width: 100%;
+  }
+
+  .info-list > div {
+    flex-direction: column;
+    gap: 2px;
+  }
+
+  .field-grid {
+    grid-template-columns: 1fr;
+  }
+
+  /* 16px avoids the automatic zoom iOS Safari applies to smaller inputs.
+     These selectors must match the ones above, or they lose on specificity. */
+  .form-inline input,
+  .form-inline select,
+  .form-grid input,
+  .form-grid select,
+  .login-card input,
+  dialog input,
+  dialog select,
+  button {
+    font-size: 16px;
+  }
+
+  button {
+    min-height: 42px;
+  }
+
+  button.small {
+    font-size: 13px;
+    min-height: 34px;
+  }
+
+  /* Keep the info icon a comfortable tap target next to the small buttons. */
+  .icon-btn {
+    width: 34px;
+    height: 34px;
+    min-height: 34px;
+  }
+
+  /* Wide tables keep a horizontal scroll instead of squashing columns. */
+  .table-wrap table:not([data-mobile="cards"]) {
+    min-width: 560px;
+  }
+
+  /* Opt-in card layout: every row becomes a labeled block. */
+  table[data-mobile="cards"] {
+    border: none;
+    background: none;
+    font-size: 14px;
+  }
+
+  table[data-mobile="cards"] thead {
+    display: none;
+  }
+
+  table[data-mobile="cards"],
+  table[data-mobile="cards"] tbody,
+  table[data-mobile="cards"] tr,
+  table[data-mobile="cards"] td {
+    display: block;
+    width: 100%;
+  }
+
+  /* --panel-alt rather than --panel: the rows are cards *on* a panel, so they
+     have to stay visible against it. */
+  table[data-mobile="cards"] tr {
+    background: var(--panel-alt);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    padding: 4px 12px;
+    margin-bottom: 10px;
+  }
+
+  table[data-mobile="cards"] tbody tr:hover {
+    background: var(--panel-alt);
+  }
+
+  table[data-mobile="cards"] td {
+    display: flex;
+    align-items: baseline;
+    justify-content: space-between;
+    gap: 12px;
+    padding: 7px 0;
+    border-bottom: 1px solid var(--border);
+  }
+
+  table[data-mobile="cards"] td:last-child {
+    border-bottom: none;
+  }
+
+  table[data-mobile="cards"] td::before {
+    content: attr(data-label);
+    flex: 0 0 auto;
+    color: var(--muted);
+    font-size: 12px;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+  }
+
+  table[data-mobile="cards"] td.cell-message {
+    justify-content: center;
+    padding: 14px 0;
+  }
+
+  table[data-mobile="cards"] td.cell-message::before {
+    content: none;
+  }
+
+  table[data-mobile="cards"] td.cell-actions {
+    justify-content: flex-end;
+    border-bottom: none;
+  }
+
+  table[data-mobile="cards"] td.cell-actions::before {
+    content: none;
+  }
+
+  dialog {
+    padding: 16px;
+  }
+
+  dialog .dialog-actions button {
+    flex: 1 1 auto;
+  }
+}

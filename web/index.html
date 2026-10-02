@@ -1,0 +1,538 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="color-scheme" content="dark light">
+  <meta name="theme-color" content="#0f1117">
+  <title>Relay-Api</title>
+  <link rel="icon" href="/favicon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="/style/base.css">
+  <link rel="stylesheet" href="/style/layout.css">
+  <link rel="stylesheet" href="/style/components.css">
+  <script>
+    /* Applied before the first paint so the page never flashes the wrong
+       palette; core/theme.js owns this setting from then on. Keep the storage
+       key in sync with THEME_KEY there. */
+    (function () {
+      try {
+        var choice = localStorage.getItem("mini-api-gateway.theme") || "auto";
+        var theme = choice === "auto"
+          ? (window.matchMedia("(prefers-color-scheme: light)").matches ? "light" : "dark")
+          : choice;
+        var root = document.documentElement;
+        root.setAttribute("data-theme", theme);
+        root.setAttribute("data-theme-choice", choice);
+        root.style.colorScheme = theme === "light" ? "light" : "dark";
+      } catch (e) { /* storage unavailable: fall back to the dark palette */ }
+    })();
+  </script>
+</head>
+<body>
+  <a class="skip-link app-view hidden" href="#mainContent">Skip to content</a>
+
+  <!-- Signed-out view: dedicated login page. -->
+  <div class="login-view" id="loginView">
+    <!-- Appearance picker: visibility is a per-browser preference, so it is
+         available before signing in too. core/theme.js drives every
+         `data-theme-select` element on the page. -->
+    <select class="theme-select" data-theme-select aria-label="Theme" title="Appearance">
+      <option value="auto">System</option>
+      <option value="dark">Dark</option>
+      <option value="light">Light</option>
+      <option value="black">Black</option>
+    </select>
+    <form class="login-card" id="loginForm">
+      <div class="login-brand">
+        <img class="brand-mark" src="/favicon.svg" alt="" aria-hidden="true">
+        <h1>Relay-Api</h1>
+      </div>
+      <p class="login-subtitle">Sign in to manage providers, models, keys and configs.</p>
+      <input type="text" id="loginUsername" placeholder="username" autocomplete="username" required>
+      <input type="password" id="loginPassword" placeholder="password" autocomplete="current-password" required>
+      <button type="submit" id="loginBtn">Log in</button>
+      <!-- One reserved line under the button: sign-in failures (core/notice.js
+           renders them into the form's `.notice` slot) and the "session
+           ended" status share it, so the card keeps its height either way. -->
+      <p id="loginNotice" class="notice login-notice" role="status"></p>
+    </form>
+  </div>
+
+  <!-- Signed-in view: header, tabs and panels (all tagged .app-view). -->
+  <header class="app-header app-view hidden">
+    <div class="brand">
+      <img class="brand-mark" src="/favicon.svg" alt="" aria-hidden="true">
+      <h1 id="appTitle" class="app-title" title="Click to refresh" role="button" tabindex="0">Relay-Api</h1>
+    </div>
+    <div class="header-actions">
+      <!-- Palette list lives in base.css; the header picker and the one on the
+           login page stay in sync through core/theme.js. -->
+      <select class="theme-select" data-theme-select aria-label="Theme" title="Appearance">
+        <option value="auto">System</option>
+        <option value="dark">Dark</option>
+        <option value="light">Light</option>
+        <option value="black">Black</option>
+      </select>
+      <div class="user-menu" id="userMenu">
+        <button type="button" class="user-menu-toggle" id="userMenuToggle" aria-haspopup="menu" aria-expanded="false">
+          <span class="user-name" id="authUser"></span>
+          <span class="caret" aria-hidden="true">▾</span>
+        </button>
+        <div class="user-menu-panel hidden" id="userMenuPanel" role="menu">
+          <button type="button" id="accountMenuBtn" role="menuitem">Account settings</button>
+          <button type="button" id="logoutBtn" class="danger" role="menuitem">Log out</button>
+        </div>
+      </div>
+    </div>
+  </header>
+
+  <nav class="tabs app-view hidden" aria-label="Sections">
+    <button type="button" data-tab="dashboard" class="active">Dashboard</button>
+    <button type="button" data-tab="providers">Providers</button>
+    <button type="button" data-tab="models">Models</button>
+    <button type="button" data-tab="keys">API Keys</button>
+    <button type="button" data-tab="configs">API Configs</button>
+    <button type="button" data-tab="usage">Usage</button>
+    <button type="button" data-tab="logs">Logs</button>
+    <button type="button" data-tab="settings">Settings</button>
+  </nav>
+
+  <main id="mainContent" class="app-view hidden">
+    <!-- Dashboard -->
+    <section id="tab-dashboard" class="tab active">
+      <div class="cards">
+        <div class="card">
+          <div class="card-label">Requests</div>
+          <div class="card-value" id="statRequests">-</div>
+        </div>
+        <div class="card">
+          <div class="card-label">Tokens</div>
+          <div class="card-value" id="statTokens">-</div>
+        </div>
+        <div class="card">
+          <div class="card-label">Errors</div>
+          <div class="card-value" id="statErrors">-</div>
+        </div>
+        <div class="card">
+          <div class="card-label">Avg Latency</div>
+          <div class="card-value" id="statLatency">-</div>
+        </div>
+      </div>
+
+      <div class="panel">
+        <h2>Models</h2>
+        <div class="table-wrap">
+          <table id="modelStatsTable" data-mobile="cards">
+            <thead><tr><th>Model</th><th>Requests</th><th>Tokens</th></tr></thead>
+            <tbody></tbody>
+          </table>
+        </div>
+      </div>
+
+      <div class="panel">
+        <h2>Recent Requests</h2>
+        <div class="table-wrap">
+          <table id="recentTable" data-mobile="cards">
+            <thead><tr><th>Time</th><th>Kind</th><th>Target</th><th>Status</th><th>Latency</th></tr></thead>
+            <tbody></tbody>
+          </table>
+        </div>
+      </div>
+    </section>
+
+    <!-- Providers -->
+    <section id="tab-providers" class="tab">
+      <div class="panel">
+        <div class="panel-head">
+          <h2>Providers</h2>
+          <button type="button" id="providerFormToggle" class="secondary small admin-only" aria-expanded="false" aria-controls="providerForm">Add provider</button>
+        </div>
+        <form id="providerForm" class="form-inline hidden">
+          <input name="name" placeholder="name" required>
+          <select name="type">
+            <option value="openai">openai</option>
+            <option value="anthropic">anthropic</option>
+            <option value="compatible">compatible</option>
+          </select>
+          <input name="baseUrl" placeholder="https://api.example.com/v1" required>
+          <input name="apiKey" placeholder="API key (optional)" autocomplete="off">
+          <button type="submit">Add</button>
+        </form>
+        <div class="table-wrap">
+          <table id="providersTable" data-mobile="cards">
+            <thead><tr><th>ID</th><th>Name</th><th>Type</th><th>Base URL</th><th>Key</th><th>Enabled</th><th></th></tr></thead>
+            <tbody></tbody>
+          </table>
+        </div>
+      </div>
+    </section>
+
+    <!-- Models -->
+    <section id="tab-models" class="tab">
+      <div class="panel">
+        <div class="panel-head">
+          <h2>Models (aliases)</h2>
+          <button type="button" id="modelFormToggle" class="secondary small admin-only" aria-expanded="false" aria-controls="modelForm">Add model</button>
+        </div>
+        <form id="modelForm" class="form-inline hidden">
+          <input name="name" placeholder="alias e.g. gpt" required>
+          <input name="providerSearch" placeholder="search provider..." autocomplete="off" list="providerOptions">
+          <datalist id="providerOptions"></datalist>
+          <input name="providerId" placeholder="provider id" type="number" inputmode="numeric" required>
+          <input name="upstreamModel" placeholder="upstream model e.g. gpt-5" required>
+          <button type="submit">Add</button>
+          <p class="hint">Tip: start typing in the provider box to filter the dropdown locally. Model aliases must be unique.</p>
+        </form>
+        <div class="table-wrap">
+          <table id="modelsTable" data-mobile="cards">
+            <thead><tr><th>ID</th><th>Alias</th><th>Provider</th><th>Upstream</th><th>Enabled</th><th></th></tr></thead>
+            <tbody></tbody>
+          </table>
+        </div>
+      </div>
+    </section>
+
+    <!-- API Keys -->
+    <section id="tab-keys" class="tab">
+      <div class="panel">
+        <div class="panel-head">
+          <h2>API Keys</h2>
+          <button type="button" id="keyCreateBtn" class="secondary small admin-only">Create key</button>
+        </div>
+        <div id="newKeyBanner" class="banner hidden" role="status"></div>
+        <div class="table-wrap">
+          <table id="keysTable" data-mobile="cards">
+            <thead><tr><th>ID</th><th>Name</th><th>Prefix</th><th>Scope</th><th>RPM</th><th>Limits (req/tok)</th><th>Last Used</th><th></th></tr></thead>
+            <tbody></tbody>
+          </table>
+        </div>
+      </div>
+    </section>
+
+    <!-- API Configs -->
+    <section id="tab-configs" class="tab">
+      <div class="panel">
+        <div class="panel-head">
+          <h2>API Configs (non-AI forwarding)</h2>
+          <div class="panel-head-actions">
+            <button type="button" id="configCreateBtn" class="secondary small admin-only">Add config</button>
+            <!-- The explanation lives behind this icon instead of in the page
+                 flow, so the panel is table-only until it is asked for. -->
+            <button type="button" id="configInfoToggle" class="icon-btn" aria-expanded="false" aria-controls="configInfoPop" aria-label="How API configs work" title="How API configs work">i</button>
+          </div>
+          <div class="info-pop hidden" id="configInfoPop">
+            <p class="hint">
+              A name may end in <code>/*</code> (one more path segment) or <code>/**</code> (everything
+              below it). The matched part is appended to the config URL:
+              <code>api/**</code> + <code>https://host/v1</code> → <code>/open/api/users/1</code> forwards to
+              <code>https://host/v1/users/1</code>.
+            </p>
+            <p class="hint">
+              Method <b>None</b> pins no upstream verb: whatever the client sends (GET, POST, …) is
+              forwarded unchanged. Any other method replaces the client's verb on every call.
+            </p>
+            <p class="hint">
+              Route picks the mount point: <code>/open/&lt;name&gt;</code> requires an API key,
+              <code>/free/&lt;name&gt;</code> is public and skips key validation, scope, quota and
+              rate limiting. A config answers on its own mount only.
+            </p>
+            <p class="hint">
+              <b>/open</b> forwards request/response JSON bodies (templates apply, the method can be
+              pinned). <b>/free</b> is a raw streaming tunnel: the client body and the upstream
+              response are piped through unbuffered, so it can carry long-lived streaming
+              protocols. Method, request/response templates are ignored there, and the
+              <b>stream timeout</b> / <b>stream body limit</b> fields apply to <code>/free</code>
+              only (0 = unlimited).
+            </p>
+          </div>
+        </div>
+        <div class="table-wrap">
+          <table id="configsTable" data-mobile="cards">
+            <thead><tr><th>ID</th><th>Name</th><th>Method</th><th>URL</th><th>Requests</th><th>Errors</th><th>Key</th><th></th></tr></thead>
+            <tbody></tbody>
+          </table>
+        </div>
+      </div>
+    </section>
+
+    <!-- Usage -->
+    <section id="tab-usage" class="tab">
+      <div class="panel">
+        <h2>Recent Usage</h2>
+        <form id="usageFilters" class="form-inline">
+          <input id="usageFilterModel" placeholder="model" aria-label="Filter by model" autocomplete="off">
+          <input id="usageFilterProvider" placeholder="provider / URL" aria-label="Filter by provider name or upstream URL" autocomplete="off">
+          <select id="usageFilterKind" aria-label="Filter by kind">
+            <option value="">all kinds</option>
+            <option value="ai">ai</option>
+            <option value="api">api</option>
+          </select>
+          <input id="usageFilterStatus" placeholder="status" inputmode="numeric" aria-label="Filter by status code" autocomplete="off">
+          <button type="submit">Filter</button>
+          <button type="button" id="usageFilterReset" class="secondary">Reset</button>
+        </form>
+        <div class="table-wrap">
+          <table id="usageTable">
+            <thead><tr><th>Time</th><th>Request ID</th><th>Kind</th><th>Model/Config</th><th>Provider</th><th>Tokens</th><th>Status</th><th>Latency</th></tr></thead>
+            <tbody></tbody>
+          </table>
+        </div>
+        <div class="panel-foot">
+          <button type="button" id="usageLoadMore" class="secondary small hidden">Load more</button>
+          <span id="usageCount" class="hint" role="status"></span>
+        </div>
+      </div>
+    </section>
+
+    <!-- Logs -->
+    <section id="tab-logs" class="tab">
+      <div class="panel">
+        <h2>Audit Logs (token reveals)</h2>
+        <div class="table-wrap">
+          <table id="logsTable">
+            <thead><tr><th>Time</th><th>Action</th><th>Target</th><th>Source IP</th></tr></thead>
+            <tbody></tbody>
+          </table>
+        </div>
+      </div>
+    </section>
+
+    <!-- Settings -->
+    <section id="tab-settings" class="tab">
+      <div class="panel" id="accountPanel">
+        <h2>Account</h2>
+        <dl class="info-list">
+          <div><dt>Signed in as</dt><dd id="accountUsername">-</dd></div>
+          <div><dt>Authentication</dt><dd id="accountAuthMethod">-</dd></div>
+          <div><dt>Role</dt><dd id="accountRole">-</dd></div>
+          <div><dt>Last login</dt><dd id="accountLastLogin">-</dd></div>
+        </dl>
+        <form id="changePwForm" class="form-inline">
+          <input type="password" name="currentPassword" placeholder="current password" autocomplete="current-password" required>
+          <input type="password" name="newPassword" placeholder="new password (min 8 chars)" minlength="8" autocomplete="new-password" required>
+          <button type="submit">Update password</button>
+        </form>
+        <p class="hint" id="changePwHint"></p>
+      </div>
+
+      <!-- Accounts and roles: hidden for read-only accounts, which is also why
+           tabs/settings.js skips the account list when it is not an admin. -->
+      <div class="panel admin-only" id="adminUsersPanel">
+        <div class="panel-head">
+          <h2>Admin Users</h2>
+          <button type="button" id="addUserToggle" class="secondary small" aria-expanded="false" aria-controls="adminUserForm">Add user</button>
+        </div>
+        <form id="adminUserForm" class="form-inline hidden">
+          <input name="username" placeholder="username" required maxlength="64" autocomplete="off">
+          <input name="password" type="password" placeholder="password (min 8 chars)" minlength="8" required autocomplete="new-password">
+          <select name="role" aria-label="Role">
+            <option value="admin">admin - full access</option>
+            <option value="user">read-only - view only</option>
+          </select>
+          <button type="submit">Create</button>
+        </form>
+        <!-- Row-action failures render in the panel; a delete asks for
+             confirmation in a dialog (never a native confirm() popup). -->
+        <p id="adminUsersNotice" class="banner danger hidden" role="alert"></p>
+        <div class="table-wrap">
+          <table id="adminUsersTable" data-mobile="cards">
+            <thead><tr><th>ID</th><th>Username</th><th>Role</th><th>Enabled</th><th>Last Login</th><th>Created</th><th></th></tr></thead>
+            <tbody></tbody>
+          </table>
+        </div>
+        <p class="hint">
+          An <strong>admin</strong> can change everything; a <strong>read-only</strong> account can see every panel but
+          nothing that mutates. Removing the last admin, changing your own role and deleting your own account are blocked.
+        </p>
+      </div>
+    </section>
+  </main>
+
+  <!-- One shared confirmation dialog for destructive row actions (deleting a
+       key, config or admin user). All copy is filled in by core/dom.js
+       askConfirm, which also runs the action and inlines any failure here. -->
+  <dialog id="confirmDialog">
+    <h3 id="confirmDialogTitle"></h3>
+    <form id="confirmDialogForm">
+      <p class="hint" id="confirmDialogMessage"></p>
+      <div class="dialog-actions">
+        <button type="button" id="confirmDialogCancel" class="secondary">Cancel</button>
+        <button type="submit" id="confirmDialogOk" class="danger">Delete</button>
+      </div>
+    </form>
+  </dialog>
+
+  <dialog id="resetPwDialog">
+    <h3>Reset password for <span id="resetPwUser"></span></h3>
+    <!-- Left blank, the field means "pick a password for me": the generated
+         value is then shown in the result panel below - exactly once. -->
+    <form id="resetPwForm">
+      <input type="password" name="newPassword" placeholder="new password (blank = random)" minlength="8" autocomplete="new-password">
+      <p class="hint">Leave blank to generate a random password.</p>
+      <div class="dialog-actions">
+        <button type="button" id="resetPwCancel" class="secondary">Cancel</button>
+        <button type="submit">Reset</button>
+      </div>
+    </form>
+    <!-- Replaces the form once a reset is done, so closing and reopening the
+         dialog cannot surface the password a second time. -->
+    <div id="resetPwResult" class="hidden">
+      <p class="hint">
+        New password for <span id="resetPwResultUser"></span> - copy it now, it is shown only once:
+      </p>
+      <p class="pw-result"><code id="resetPwResultValue"></code></p>
+      <div class="dialog-actions">
+        <button type="button" id="resetPwDone" class="secondary">Done</button>
+      </div>
+    </div>
+  </dialog>
+
+  <dialog id="providerEditDialog">
+    <h3>Edit provider <span id="providerEditName"></span></h3>
+    <form id="providerEditForm" data-id="">
+      <input name="name" placeholder="name" required>
+      <select name="type">
+        <option value="openai">openai</option>
+        <option value="anthropic">anthropic</option>
+        <option value="compatible">compatible</option>
+      </select>
+      <input name="baseUrl" placeholder="https://api.example.com/v1" required>
+      <input name="apiKey" placeholder="new API key (leave blank to keep)" autocomplete="off">
+      <label class="check-row"><input type="checkbox" name="enabled"> enabled</label>
+      <div class="dialog-actions">
+        <button type="button" id="providerEditCancel" class="secondary">Cancel</button>
+        <button type="submit">Save</button>
+      </div>
+    </form>
+  </dialog>
+
+  <!-- One dialog serves both add and edit: the mode (and, when editing, the
+       row id) is carried on the form's data attributes by tabs/configs.js. -->
+  <dialog id="configDialog">
+    <h3 id="configDialogTitle">Add config</h3>
+    <form id="configForm" data-id="" data-mode="create">
+      <input name="name" placeholder="name e.g. weather, api/*, api/**" required>
+      <input name="url" placeholder="https://api.example.com/weather" required>
+      <select name="method" id="configMethod">
+        <option value="POST">POST</option>
+        <option value="GET">GET</option>
+        <option value="PUT">PUT</option>
+        <option value="DELETE">DELETE</option>
+        <option value="PATCH">PATCH</option>
+        <option value="NONE">None (any method)</option>
+        <option value="">Custom…</option>
+      </select>
+      <input name="customMethod" id="configCustomMethod" placeholder="custom method" class="hidden" maxlength="16">
+      <select name="route" id="configRoute" aria-label="Route">
+        <option value="open">/open/* — API key required</option>
+        <option value="free">/free/* — public, no key</option>
+      </select>
+      <input name="streamTimeoutMs" type="number" min="0" placeholder="stream timeout ms on /free (0 = no timeout)">
+      <input name="streamMaxBodyMb" type="number" min="0" placeholder="stream body limit MB on /free (0 = unlimited)">
+      <input name="apiKey" placeholder="upstream key (optional)" autocomplete="off">
+      <input name="headers" placeholder='{"Authorization":"Bearer ..."} (JSON, optional)'>
+      <input name="requestTemplate" placeholder='{"city":"{{body.city}}"} (JSON, optional)'>
+      <input name="responseTemplate" placeholder='{"content":"{{data.result}}"} (JSON, optional)'>
+      <label class="check-row"><input type="checkbox" name="enabled"> enabled</label>
+      <div class="dialog-actions">
+        <button type="button" id="configDialogCancel" class="secondary">Cancel</button>
+        <button type="submit" id="configDialogSubmit">Create</button>
+      </div>
+    </form>
+  </dialog>
+
+  <dialog id="keyDialog">
+    <h3 id="keyDialogTitle">Add API key</h3>
+    <form id="keyForm" data-id="">
+      <label class="field">
+        <span>Name</span>
+        <input name="name" placeholder="e.g. laptop" required maxlength="64">
+      </label>
+      <label class="field">
+        <span>Scope</span>
+        <select name="scope">
+          <option value="both">both (AI + forwarding)</option>
+          <option value="ai">ai (/v1/* only)</option>
+          <option value="api">api (/open/* only)</option>
+        </select>
+      </label>
+      <label class="field">
+        <span>Rate limit (requests per minute)</span>
+        <input name="rateLimit" type="number" inputmode="numeric" min="1" value="60" required>
+      </label>
+      <label class="check-row hidden" id="keyEnabledField">
+        <input type="checkbox" name="enabled"> enabled
+      </label>
+
+      <fieldset>
+        <legend>Quotas (0 = unlimited)</legend>
+        <div class="field-grid">
+          <label class="field">
+            <span>Daily requests</span>
+            <input name="dailyRequestLimit" type="number" inputmode="numeric" min="0" step="1" value="0">
+          </label>
+          <label class="field">
+            <span>Daily tokens (millions)</span>
+            <input name="dailyTokenLimit" type="number" inputmode="decimal" min="0" step="any" value="0">
+          </label>
+          <label class="field">
+            <span>Weekly requests</span>
+            <input name="weeklyRequestLimit" type="number" inputmode="numeric" min="0" step="1" value="0">
+          </label>
+          <label class="field">
+            <span>Weekly tokens (millions)</span>
+            <input name="weeklyTokenLimit" type="number" inputmode="decimal" min="0" step="any" value="0">
+          </label>
+          <label class="field">
+            <span>Monthly requests</span>
+            <input name="monthlyRequestLimit" type="number" inputmode="numeric" min="0" step="1" value="0">
+          </label>
+          <label class="field">
+            <span>Monthly tokens (millions)</span>
+            <input name="monthlyTokenLimit" type="number" inputmode="decimal" min="0" step="any" value="0">
+          </label>
+        </div>
+        <p class="hint">Day / week (Monday) / month reset on local boundaries. Token values are in millions (e.g. 1.5 = 1,500,000 tokens).</p>
+      </fieldset>
+
+      <div class="dialog-actions">
+        <button type="button" id="keyDialogCancel" class="secondary">Cancel</button>
+        <button type="submit" id="keyDialogSubmit">Create</button>
+      </div>
+    </form>
+  </dialog>
+
+  <dialog id="modelEditDialog">
+    <h3>Edit model <span id="modelEditName"></span></h3>
+    <form id="modelEditForm" data-id="">
+      <input name="name" placeholder="alias e.g. gpt" required>
+      <input name="providerSearch" placeholder="search provider..." autocomplete="off" list="providerEditOptions">
+      <datalist id="providerEditOptions"></datalist>
+      <input name="providerId" placeholder="provider id" type="number" inputmode="numeric" required>
+      <input name="upstreamModel" placeholder="upstream model e.g. gpt-5" required>
+      <label class="check-row"><input type="checkbox" name="enabled"> enabled</label>
+      <div class="dialog-actions">
+        <button type="button" id="modelEditCancel" class="secondary">Cancel</button>
+        <button type="submit">Save</button>
+      </div>
+    </form>
+  </dialog>
+
+  <script>
+    /* Pick the view before the first paint, the same way the theme is picked in
+       <head>: a reload with a stored session must land on the dashboard, not
+       flash the login page while core/auth.js is still loading. A token that
+       turns out to be stale is handled right after - the first rejected request
+       clears it and core/auth.js switches back to the login page. Keep the
+       storage key in sync with core/api.js. */
+    (function () {
+      try {
+        if (!sessionStorage.getItem("adminToken")) return;
+        document.getElementById("loginView").classList.add("hidden");
+        for (const node of document.querySelectorAll(".app-view")) node.classList.remove("hidden");
+      } catch (e) { /* storage unavailable: keep the login page */ }
+    })();
+  </script>
+  <script type="module" src="/js/app.js"></script>
+</body>
+</html>
