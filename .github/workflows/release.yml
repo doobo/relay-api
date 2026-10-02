@@ -1,7 +1,12 @@
 name: Release
 
-# 手动触发：在 Actions 页点 "Run workflow"，填入版本号（v1.0.0 或 1.0.0 均可）。
+# 两种触发方式：
+#   1. 推送 v* 标签：git tag v0.1.0 && git push origin v0.1.0
+#   2. 手动触发：在 Actions 页点 "Run workflow"，填入版本号（v1.0.0 或 1.0.0 均可）
 on:
+  push:
+    tags:
+      - "v*"
   workflow_dispatch:
     inputs:
       version:
@@ -38,18 +43,24 @@ jobs:
         with:
           fetch-depth: 0 # make release 用 git describe 取版本号，需要完整历史与标签
 
-      - name: 校验版本号
+      - name: 确定版本号
         id: version
         env:
           RAW_VERSION: ${{ inputs.version }}
         run: |
           set -euo pipefail
-          tag="$(echo "$RAW_VERSION" | tr -d '[:space:]' | sed 's/^v//')"
+          if [ "${{ github.event_name }}" = "push" ]; then
+            # 标签已由 push 带上来（形如 v1.0.0），剥掉前缀走同一条校验。
+            tag="${GITHUB_REF_NAME}"
+          else
+            tag="$RAW_VERSION"
+          fi
+          tag="$(echo "$tag" | tr -d '[:space:]' | sed 's/^v//')"
           if ! echo "$tag" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+([-.+][0-9A-Za-z.-]+)*$'; then
-            echo "::error::版本号格式非法：$RAW_VERSION（应形如 v1.0.0 或 1.0.0）"
+            echo "::error::版本号格式非法：$tag（应形如 v1.0.0 或 1.0.0）"
             exit 1
           fi
-          if git rev-parse "refs/tags/v$tag" >/dev/null 2>&1; then
+          if [ "${{ github.event_name }}" != "push" ] && git rev-parse "refs/tags/v$tag" >/dev/null 2>&1; then
             echo "::error::标签 v$tag 已存在，请换一个版本号"
             exit 1
           fi
@@ -81,8 +92,6 @@ jobs:
           ls -lh dist
 
       - name: 生成发布说明
-        env:
-          TAG: ${{ steps.version.outputs.tag }}
         run: |
           set -euo pipefail
           notes="${RUNNER_TEMP}/notes.md"
@@ -115,17 +124,26 @@ jobs:
       - name: 打标签并创建 Release
         env:
           GH_TOKEN: ${{ github.token }}
-          TAG: ${{ steps.version.outputs.tag }}
+          TAG: v${{ steps.version.outputs.tag }}
           IS_DRAFT: ${{ inputs.draft }}
           IS_PRERELEASE: ${{ inputs.prerelease }}
           NOTES: ${{ runner.temp }}/notes.md
+          EVENT_NAME: ${{ github.event_name }}
         run: |
           set -euo pipefail
 
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git tag -a "$TAG" -m "Release $TAG"
-          git push origin "$TAG"
+          # push 触发时标签已存在并已推送，只需补建 Release。
+          if [ "$EVENT_NAME" != "push" ]; then
+            git config user.name "github-actions[bot]"
+            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+            git tag -a "$TAG" -m "Release $TAG"
+            git push origin "$TAG"
+          fi
+
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            echo "::error::Release $TAG 已存在，若需重跑请先删除该 Release 与标签"
+            exit 1
+          fi
 
           args=(--title "$TAG" --notes-file "$NOTES")
           if [ "$IS_DRAFT" = "true" ]; then args+=(--draft); fi
@@ -137,7 +155,7 @@ jobs:
       - name: 输出发布结果
         env:
           GH_TOKEN: ${{ github.token }}
-          TAG: ${{ steps.version.outputs.tag }}
+          TAG: v${{ steps.version.outputs.tag }}
         run: |
           gh release view "$TAG" --json url,isDraft,isPrerelease \
             -q '"url=\(.url) draft=\(.isDraft) prerelease=\(.isPrerelease)"'
