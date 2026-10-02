@@ -64,7 +64,8 @@ jobs:
             echo "::error::标签 v$tag 已存在，请换一个版本号"
             exit 1
           fi
-          echo "tag=v$tag" >> "$GITHUB_OUTPUT"
+          # 输出不带 v 前缀，下游统一用 v${{ steps.version.outputs.tag }} 拼接，避免出现 vv。
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
 
       - name: 安装 Go
         uses: actions/setup-go@v5
@@ -80,7 +81,7 @@ jobs:
 
       - name: 交叉编译各平台发布包
         env:
-          VERSION: v${{ steps.version.outputs.tag }}
+          VERSION: v${{ steps.version.outputs.tag }}   # 产物文件名带 v 前缀
         run: make release
 
       - name: 校验产物
