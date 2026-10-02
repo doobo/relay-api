@@ -1,0 +1,143 @@
+name: Release
+
+# 手动触发：在 Actions 页点 "Run workflow"，填入版本号（v1.0.0 或 1.0.0 均可）。
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "版本号，例如 v1.0.0 或 1.0.0（会自动补 v 前缀）"
+        required: true
+        type: string
+      draft:
+        description: "是否创建为草稿 Release"
+        required: false
+        default: false
+        type: boolean
+      prerelease:
+        description: "是否标记为预发布"
+        required: false
+        default: false
+        type: boolean
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  release:
+    name: 构建并发布
+    runs-on: ubuntu-latest
+    env:
+      GO_VERSION: "1.27"
+    steps:
+      - name: 检出代码
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # make release 用 git describe 取版本号，需要完整历史与标签
+
+      - name: 校验版本号
+        id: version
+        env:
+          RAW_VERSION: ${{ inputs.version }}
+        run: |
+          set -euo pipefail
+          tag="$(echo "$RAW_VERSION" | tr -d '[:space:]' | sed 's/^v//')"
+          if ! echo "$tag" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+([-.+][0-9A-Za-z.-]+)*$'; then
+            echo "::error::版本号格式非法：$RAW_VERSION（应形如 v1.0.0 或 1.0.0）"
+            exit 1
+          fi
+          if git rev-parse "refs/tags/v$tag" >/dev/null 2>&1; then
+            echo "::error::标签 v$tag 已存在，请换一个版本号"
+            exit 1
+          fi
+          echo "tag=v$tag" >> "$GITHUB_OUTPUT"
+
+      - name: 安装 Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache: true
+
+      - name: 静态检查与测试
+        run: |
+          make fmt-check
+          make vet
+          make test
+
+      - name: 交叉编译各平台发布包
+        env:
+          VERSION: v${{ steps.version.outputs.tag }}
+        run: make release
+
+      - name: 校验产物
+        run: |
+          set -euo pipefail
+          test -s dist/SHA256SUMS || { echo "::error::缺少 SHA256SUMS"; exit 1; }
+          (cd dist && sha256sum --check --quiet SHA256SUMS)
+          echo "产物校验通过："
+          ls -lh dist
+
+      - name: 生成发布说明
+        env:
+          TAG: ${{ steps.version.outputs.tag }}
+        run: |
+          set -euo pipefail
+          notes="${RUNNER_TEMP}/notes.md"
+          {
+            echo "由 [\`${GITHUB_REPOSITORY}\`](${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}) 自动发布。"
+            echo
+            echo "## 下载"
+            echo
+            echo "| 平台 | 文件 |"
+            echo "| --- | --- |"
+            for f in dist/*; do
+              name="$(basename "$f")"
+              [ "$name" = "SHA256SUMS" ] && continue
+              # 去掉打包扩展名后取最后两段作为 os/arch，兼容带 v 前缀且含连字符的版本号。
+              stem="$(echo "$name" | sed -E 's/\.(tar\.gz|zip)$//')"
+              platform="$(echo "$stem" | grep -oE '[^ -]+-[^ -]+$')"
+              echo "| \`${platform}\` | \`${name}\` |"
+            done
+            echo
+            echo "## 校验"
+            echo
+            echo '```bash'
+            echo "sha256sum --check SHA256SUMS   # 下载后先校验再使用"
+            echo '```'
+            echo
+            echo "解压后直接运行即可，无需 CGO 或外部依赖（SQLite 数据文件除外）。"
+          } > "$notes"
+          cat "$notes"
+
+      - name: 打标签并创建 Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.version.outputs.tag }}
+          IS_DRAFT: ${{ inputs.draft }}
+          IS_PRERELEASE: ${{ inputs.prerelease }}
+          NOTES: ${{ runner.temp }}/notes.md
+        run: |
+          set -euo pipefail
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git tag -a "$TAG" -m "Release $TAG"
+          git push origin "$TAG"
+
+          args=(--title "$TAG" --notes-file "$NOTES")
+          if [ "$IS_DRAFT" = "true" ]; then args+=(--draft); fi
+          if [ "$IS_PRERELEASE" = "true" ]; then args+=(--prerelease); fi
+
+          gh release create "$TAG" "${args[@]}" dist/*
+          echo "已创建：${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/releases/tag/${TAG}"
+
+      - name: 输出发布结果
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.version.outputs.tag }}
+        run: |
+          gh release view "$TAG" --json url,isDraft,isPrerelease \
+            -q '"url=\(.url) draft=\(.isDraft) prerelease=\(.isPrerelease)"'
