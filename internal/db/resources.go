@@ -633,6 +633,7 @@ func CreateAPIConfig(input NewAPIConfig) (*APIConfigRow, error) {
 	if err != nil {
 		return nil, err
 	}
+	invalidateAPIConfigCache()
 	return GetAPIConfig(id)
 }
 
@@ -703,6 +704,7 @@ func UpdateAPIConfig(id int64, patch APIConfigPatch) (*APIConfigRow, error) {
 	if err != nil {
 		return nil, err
 	}
+	invalidateAPIConfigCache()
 	return GetAPIConfig(id)
 }
 
@@ -720,6 +722,7 @@ func DeleteAPIConfig(id int64) (bool, error) {
 		return false, err
 	}
 	affected, err := result.RowsAffected()
+	invalidateAPIConfigCache()
 	return affected > 0, err
 }
 

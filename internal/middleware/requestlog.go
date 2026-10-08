@@ -2,6 +2,7 @@ package middleware
 
 import (
 	"context"
+	"io"
 	"log/slog"
 	"net/http"
 	"time"
@@ -77,4 +78,18 @@ func (s *statusRecorder) Flush() {
 	if flusher, ok := s.ResponseWriter.(http.Flusher); ok {
 		flusher.Flush()
 	}
+}
+
+// ReadFrom forwards to the underlying writer so io.Copy can take its zero-copy
+// fast path (splice on Linux) instead of bouncing through a user-space buffer.
+// Without this, wrapping the writer in the recorder silently disables it.
+func (s *statusRecorder) ReadFrom(src io.Reader) (int64, error) {
+	if !s.wrote {
+		s.status = http.StatusOK
+		s.wrote = true
+	}
+	if readerFrom, ok := s.ResponseWriter.(io.ReaderFrom); ok {
+		return readerFrom.ReadFrom(src)
+	}
+	return io.Copy(s.ResponseWriter, src)
 }

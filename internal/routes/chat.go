@@ -348,7 +348,7 @@ func (g *Gateway) recordAI(requestID string, apiKeyID int64, model, providerName
 		providerCopy := providerName
 		providerPtr = &providerCopy
 	}
-	_ = db.RecordUsage(db.UsageRecord{
+	db.RecordUsageAsync(db.UsageRecord{
 		RequestID:    requestID,
 		APIKeyID:     &keyID,
 		Kind:         "ai",

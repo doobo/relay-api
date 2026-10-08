@@ -1,6 +1,7 @@
 package routes
 
 import (
+	"context"
 	"encoding/json"
 	"io"
 	"net/http"
@@ -202,6 +203,11 @@ func TestGateway(t *testing.T) {
 	})
 
 	t.Run("usage recorded", func(t *testing.T) {
+		// Chat records usage asynchronously; flush the batch writer so the rows
+		// are visible before they are counted.
+		if err := db.FlushUsage(context.Background()); err != nil {
+			t.Fatalf("flush usage: %v", err)
+		}
 		var count int
 		if err := db.Get().QueryRow(`SELECT COUNT(*) FROM usage_logs WHERE kind = 'ai' AND status = 200`).Scan(&count); err != nil {
 			t.Fatalf("query usage: %v", err)

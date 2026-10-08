@@ -2,22 +2,94 @@ package util
 
 import (
 	"context"
+	"crypto/tls"
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
+	"os"
 	"strings"
 	"sync"
 	"time"
+
+	"golang.org/x/net/http2"
 )
 
 // ErrUpstreamTimeout marks a request that exceeded its configured timeout (as
 // opposed to a client-side cancellation).
 var ErrUpstreamTimeout = errors.New("upstream timeout")
 
+// Upstream connection-pool sizing. The standard library default transport keeps
+// only two idle connections per host (http.DefaultMaxIdleConnsPerHost), so
+// concurrent requests to the same upstream force a fresh TCP/TLS handshake and
+// a fresh DNS lookup for nearly every one. Xray's XHTTP transport fans a single
+// client into many parallel POST/GET streams, which makes that default the
+// largest throughput limiter when relaying it, so the pool is widened here.
+const (
+	maxIdleConns        = 512
+	maxIdleConnsPerHost = 64
+	idleConnTimeout     = 90 * time.Second
+)
+
+// httpsTransport serves TLS upstreams (and plaintext HTTP/1.1 upstreams while
+// h2c is disabled). ForceAttemptHTTP2 lets https endpoints negotiate HTTP/2.
+var httpsTransport = &http.Transport{
+	Proxy:               http.ProxyFromEnvironment,
+	ForceAttemptHTTP2:   true,
+	MaxIdleConns:        maxIdleConns,
+	MaxIdleConnsPerHost: maxIdleConnsPerHost,
+	IdleConnTimeout:     idleConnTimeout,
+}
+
+// h2cTransport serves cleartext HTTP/2 upstreams. It is nil unless
+// UPSTREAM_H2C is set, because a plain HTTP/1.1 upstream (most APIs, and any
+// server without a cleartext HTTP/2 listener) rejects an h2c preface.
+var h2cTransport = newH2CTransport()
+
+// newH2CTransport returns an h2c-capable round tripper when UPSTREAM_H2C is
+// truthy, otherwise nil so plaintext upstreams keep their HTTP/1.1 behaviour.
+func newH2CTransport() http.RoundTripper {
+	if !upstreamH2CEnabled() {
+		return nil
+	}
+	return &http2.Transport{
+		AllowHTTP: true,
+		// AllowHTTP makes the transport use h2c for http:// URLs, so the dialer
+		// must hand back a plain connection instead of a TLS one. Note that
+		// http2.Transport multiplexes every stream over one connection and does
+		// not consult a proxy - both are deliberate for an XHTTP upstream.
+		DialTLSContext: func(ctx context.Context, network, addr string, _ *tls.Config) (net.Conn, error) {
+			return (&net.Dialer{}).DialContext(ctx, network, addr)
+		},
+	}
+}
+
+// upstreamH2CEnabled reports whether UPSTREAM_H2C opts plaintext upstreams into
+// cleartext HTTP/2, accepting the usual truthy spellings.
+func upstreamH2CEnabled() bool {
+	switch strings.ToLower(strings.TrimSpace(os.Getenv("UPSTREAM_H2C"))) {
+	case "1", "true", "yes", "on":
+		return true
+	default:
+		return false
+	}
+}
+
+// transportRouter picks a transport per request scheme, so an https upstream
+// keeps its TLS + HTTP/2 handling while a plaintext one can opt into h2c.
+type transportRouter struct{}
+
+func (transportRouter) RoundTrip(request *http.Request) (*http.Response, error) {
+	if h2cTransport != nil && request.URL.Scheme == "http" {
+		return h2cTransport.RoundTrip(request)
+	}
+	return httpsTransport.RoundTrip(request)
+}
+
 // httpClient has no global timeout: per-call timeouts are applied via context,
 // and streaming calls deliberately run without one.
-var httpClient = &http.Client{}
+var httpClient = &http.Client{Transport: transportRouter{}}
 
 // FetchOptions describes one upstream request.
 type FetchOptions struct {

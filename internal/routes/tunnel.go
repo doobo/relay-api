@@ -68,7 +68,7 @@ func (h *TunnelRoutes) handle(w http.ResponseWriter, r *http.Request) {
 	record := func(status int, errMsg *string) {
 		configID := apiConfig.ID
 		latency := time.Since(startedAt).Milliseconds()
-		_ = db.RecordUsage(db.UsageRecord{
+		db.RecordUsageAsync(db.UsageRecord{
 			RequestID:   requestID,
 			APIKeyID:    nil,
 			Kind:        "api",
@@ -219,8 +219,11 @@ func (h *TunnelRoutes) handle(w http.ResponseWriter, r *http.Request) {
 	}
 	w.Header().Set("X-Request-ID", requestID)
 	w.WriteHeader(response.StatusCode)
-	record(response.StatusCode, nil)
 	copyAndFlush(w, response.Body)
+	// Recorded after the response is copied: the usage write no longer sits
+	// between the client and its first byte (and, being async, does not block
+	// the handler on the single SQLite connection either).
+	record(response.StatusCode, nil)
 }
 
 // writeTooLarge renders the shared 400 for an over-limit tunnel body.
@@ -250,21 +253,44 @@ func (b *limitedBody) Read(p []byte) (int, error) {
 	return n, err
 }
 
-// copyAndFlush streams src into w, flushing after every chunk so a long-lived
-// response is delivered as it is produced rather than sitting in the server's
-// write buffer.
+// Tunnel copy tuning. The previous loop flushed every 32 KiB, turning a bulk
+// relay into one syscall/DATA frame per chunk; a larger buffer plus a throttle
+// keeps the response prompt while cutting the flush count by an order of
+// magnitude.
+const (
+	tunnelCopyBuffer    = 256 * 1024
+	tunnelFlushBytes    = 64 * 1024
+	tunnelFlushInterval = 200 * time.Microsecond
+)
+
+// copyAndFlush streams src into w so a long-lived response is delivered as it
+// is produced. It flushes once enough has accumulated, once a short read shows
+// nothing more is buffered upstream (so the client sees it immediately), or
+// once the last flush is getting stale. Without a flusher it degrades to
+// io.Copy.
 func copyAndFlush(w http.ResponseWriter, src io.Reader) {
 	flusher, _ := w.(http.Flusher)
-	buffer := make([]byte, 32*1024)
+	if flusher == nil {
+		_, _ = io.Copy(w, src)
+		return
+	}
+	buffer := make([]byte, tunnelCopyBuffer)
+	var pending int
+	lastFlush := time.Now()
 	for {
 		n, err := src.Read(buffer)
 		if n > 0 {
 			if _, writeErr := w.Write(buffer[:n]); writeErr != nil {
 				return
 			}
-			if flusher != nil {
-				flusher.Flush()
-			}
+			pending += n
+		}
+		if pending > 0 && (pending >= tunnelFlushBytes ||
+			n < len(buffer) ||
+			time.Since(lastFlush) >= tunnelFlushInterval) {
+			flusher.Flush()
+			pending = 0
+			lastFlush = time.Now()
 		}
 		if err != nil {
 			return

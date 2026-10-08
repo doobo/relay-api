@@ -285,6 +285,11 @@ func TestTunnelUsage(t *testing.T) {
 	if recorder.Code != http.StatusOK {
 		t.Fatalf("status = %d", recorder.Code)
 	}
+	// The tunnel records usage asynchronously; flush the batch writer so the
+	// row is visible before it is asserted on.
+	if err := db.FlushUsage(context.Background()); err != nil {
+		t.Fatalf("flush usage: %v", err)
+	}
 
 	var (
 		kind      string

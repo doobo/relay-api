@@ -52,6 +52,9 @@ func Open(path string) (*sql.DB, error) {
 	mu.Lock()
 	handle = sqlDB
 	mu.Unlock()
+	// Drop any config set cached against a previous handle.
+	invalidateAPIConfigCache()
+	startUsageWriter()
 	return sqlDB, nil
 }
 
@@ -82,6 +85,8 @@ func Get() *sql.DB {
 
 // Close releases the connection pool.
 func Close() error {
+	// Drain any queued usage rows before the handle is released.
+	stopUsageWriter()
 	mu.Lock()
 	defer mu.Unlock()
 	if handle == nil {

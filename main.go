@@ -112,7 +112,20 @@ func main() {
 	// preface (PRI * HTTP/2.0) or an "Upgrade: h2c" request is served as
 	// HTTP/2, everything else falls through to the standard HTTP/1.1 server.
 	// One port covers both, replacing the reference's H2C_PORT.
-	h2s := &http2.Server{}
+	//
+	// XHTTP fans one client into many parallel streams, so the per-stream and
+	// per-connection receive windows are widened (the library defaults to 1 MiB
+	// each) to keep a high-BDP cross-region link from being throttled to
+	// window/RTT, and more concurrent streams are allowed per connection
+	// (default 250). No IdleTimeout is set deliberately: SSE streams and the
+	// /free tunnel are long-lived and may sit idle, so idle control stays in the
+	// handlers (STREAM_IDLE_TIMEOUT_MS).
+	h2s := &http2.Server{
+		MaxConcurrentStreams:         1000,
+		MaxReadFrameSize:             1 << 20,
+		MaxUploadBufferPerStream:     2 << 20,
+		MaxUploadBufferPerConnection: 8 << 20,
+	}
 	srv := &http.Server{
 		Addr:              ":" + strconv.Itoa(cfg.Port),
 		Handler:           h2c.NewHandler(middleware.RequestLog(mux), h2s),

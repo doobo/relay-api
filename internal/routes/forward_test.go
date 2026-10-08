@@ -87,6 +87,12 @@ func TestForward(t *testing.T) {
 		Name: "api/**", Method: "POST", URL: mock.URL + "/base",
 		TimeoutMs: 15000, Route: "open", Enabled: true,
 	})
+	// An exact config that also falls under the "api/**" wildcard: the exact
+	// name must win over the pattern.
+	mustConfig(t, db.NewAPIConfig{
+		Name: "api/special", Method: "POST", URL: mock.URL + "/special-exact",
+		TimeoutMs: 15000, Route: "open", Enabled: true,
+	})
 	mustConfig(t, db.NewAPIConfig{
 		Name: "any", Method: "NONE", URL: mock.URL + "/echo",
 		TimeoutMs: 15000, Route: "open", Enabled: true,
@@ -145,6 +151,16 @@ func TestForward(t *testing.T) {
 		}
 		if strings.TrimSpace(seen.Body) != `{"city":"Hangzhou"}` {
 			t.Fatalf("request template not applied: %s", seen.Body)
+		}
+	})
+
+	t.Run("exact name wins over wildcard", func(t *testing.T) {
+		recorder := call(t, http.MethodPost, "/open/api/special", fullKey, `{}`, nil)
+		if recorder.Code != http.StatusOK {
+			t.Fatalf("status = %d, body = %s", recorder.Code, recorder.Body.String())
+		}
+		if seen := capture(); seen.Path != "/special-exact" {
+			t.Fatalf("exact config not preferred, upstream path = %q", seen.Path)
 		}
 	})
 

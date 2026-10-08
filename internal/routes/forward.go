@@ -74,7 +74,7 @@ func (h *ForwardRoutes) handle(w http.ResponseWriter, r *http.Request) {
 		}
 		configID := apiConfig.ID
 		latency := time.Since(startedAt).Milliseconds()
-		_ = db.RecordUsage(db.UsageRecord{
+		db.RecordUsageAsync(db.UsageRecord{
 			RequestID:   requestID,
 			APIKeyID:    keyPtr,
 			Kind:        "api",
