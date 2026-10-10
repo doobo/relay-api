@@ -7,7 +7,28 @@
 
 const API = "";
 
-let token = sessionStorage.getItem("adminToken") || "";
+// The login session must survive new tabs (and browser restarts, until the
+// server-side TTL expires), so it lives in localStorage, which is shared by
+// every tab on this origin. sessionStorage is tab-local, which is exactly why
+// a new tab used to land on the login page.
+const TOKEN_KEY = "adminToken";
+
+function readStoredToken() {
+  try {
+    // One-time migration: a session stored by an older build keeps working.
+    const legacy = sessionStorage.getItem(TOKEN_KEY);
+    if (legacy) {
+      localStorage.setItem(TOKEN_KEY, legacy);
+      sessionStorage.removeItem(TOKEN_KEY);
+      return legacy;
+    }
+    return localStorage.getItem(TOKEN_KEY) || "";
+  } catch {
+    return "";
+  }
+}
+
+let token = readStoredToken();
 const tokenListeners = new Set();
 
 /** Subscribe to token changes. The listener receives the new token string. */
@@ -21,10 +42,26 @@ export function getToken() {
 
 export function setToken(value) {
   token = value || "";
-  if (token) sessionStorage.setItem("adminToken", token);
-  else sessionStorage.removeItem("adminToken");
+  try {
+    if (token) localStorage.setItem(TOKEN_KEY, token);
+    else localStorage.removeItem(TOKEN_KEY);
+    sessionStorage.removeItem(TOKEN_KEY);
+  } catch {}
   for (const listener of tokenListeners) listener(token);
 }
+
+// A login/logout in another tab applies here too, so tabs never disagree
+// about the session state. The event only fires in tabs other than the one
+// that made the change.
+try {
+  window.addEventListener("storage", (event) => {
+    if (event.key !== TOKEN_KEY) return;
+    const next = event.newValue || "";
+    if (next === token) return;
+    token = next;
+    for (const listener of tokenListeners) listener(token);
+  });
+} catch {}
 
 export async function api(path, options = {}) {
   const res = await fetch(`${API}${path}`, {

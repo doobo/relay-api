@@ -51,7 +51,9 @@ func NewAdminAuthMiddleware(adminToken string) *AdminAuthMiddleware {
 }
 
 // Handler wraps the /admin/* subtree. Only POST /admin/auth/login and
-// GET /admin/auth/challenge are public; everything else needs a bearer token.
+// GET/POST /admin/auth/challenge are public; everything else needs a bearer token.
+// Challenge accepts POST because CDNs and browsers only cache GET by default:
+// a cached challenge reuses its single-use nonce and breaks logins behind a CDN.
 func (m *AdminAuthMiddleware) Handler(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		path := strings.ReplaceAll(r.URL.Path, "\\", "/")
@@ -59,7 +61,7 @@ func (m *AdminAuthMiddleware) Handler(next http.Handler) http.Handler {
 			next.ServeHTTP(w, r)
 			return
 		}
-		if path == "/admin/auth/challenge" && r.Method == http.MethodGet {
+		if path == "/admin/auth/challenge" && (r.Method == http.MethodGet || r.Method == http.MethodPost) {
 			next.ServeHTTP(w, r)
 			return
 		}

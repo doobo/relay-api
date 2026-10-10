@@ -158,13 +158,32 @@ async function encryptWithTweetNacl(challenge, username, password) {
 /**
  * Fetches a one-time challenge and encrypts the credentials with whichever
  * scheme this browser supports. The password is never sent in the clear.
+ *
+ * cache: "no-store" keeps browsers (and any proxy that honours it) from
+ * serving a cached challenge: the nonce inside is single-use, so a replayed
+ * challenge always fails the login with "invalid or expired". The request is
+ * a POST for the same reason: responses to POST are never cached by default,
+ * so a CDN in front of the origin cannot serve a stale challenge.
  */
 async function buildLoginBody(username, password) {
-  const challenge = await api("/admin/auth/challenge");
+  const challenge = await api("/admin/auth/challenge", { method: "POST", cache: "no-store" });
   if (globalThis.crypto?.subtle && challenge.publicKey) {
     return { encrypted: await encryptWithWebCrypto(challenge, username, password) };
   }
   return { box: await encryptWithTweetNacl(challenge, username, password) };
+}
+
+/** A stale challenge (cached page, restarted server, failover) fails the
+ * login with this 400; rebuilding the body fetches a fresh challenge. */
+function isStaleChallengeError(e) {
+  return e?.message?.startsWith("400:") && e.message.includes("invalid or expired");
+}
+
+async function postLogin(body) {
+  return api("/admin/auth/login", {
+    method: "POST",
+    body: JSON.stringify(body),
+  });
 }
 
 export function initAuth() {
@@ -179,13 +198,19 @@ export function initAuth() {
     if (!username || !password) return notifyError("Enter username and password.", { form: loginForm });
     try {
       // The password never leaves the browser in the clear.
-      const body = await buildLoginBody(username, password);
-      const res = await api("/admin/auth/login", {
-        method: "POST",
-        body: JSON.stringify(body),
-      });
-      loginForm.reset();
-      setToken(res.token);
+      try {
+        const res = await postLogin(await buildLoginBody(username, password));
+        loginForm.reset();
+        setToken(res.token);
+      } catch (e) {
+        // One transparent retry with a fresh challenge: the first attempt may
+        // have used a stale challenge (cached response, server restart or a
+        // failover to another instance), and its nonce is already spent.
+        if (!isStaleChallengeError(e)) throw e;
+        const res = await postLogin(await buildLoginBody(username, password));
+        loginForm.reset();
+        setToken(res.token);
+      }
     } catch (e) {
       notifyError(`Login failed: ${e.message}`, { form: loginForm });
       el("loginPassword").focus();

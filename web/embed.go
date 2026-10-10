@@ -55,6 +55,13 @@ func Handler() http.Handler {
 		}
 
 		w.Header().Set("content-type", contentTypeFor(name))
+		// Admin UI assets ship inside the binary and change with every build,
+		// but their URLs don't (no content hashes). Without this, a CDN or the
+		// browser would keep serving the previous build's files after an
+		// upgrade - e.g. an old auth.js that still fetches the login challenge
+		// with GET instead of POST.
+		w.Header().Set("Cache-Control", "no-store")
+		w.Header().Set("Pragma", "no-cache")
 		w.WriteHeader(http.StatusOK)
 		if r.Method == http.MethodHead {
 			return

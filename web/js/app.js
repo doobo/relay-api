@@ -48,7 +48,7 @@ function init() {
     if (value) refreshWithRole();
   });
 
-  // A session restored from sessionStorage does not change the token, so the
+  // A session restored from storage does not change the token, so the
   // listener above never fires: fill the visible tab explicitly on mount.
   if (getToken()) {
     refreshWithRole();

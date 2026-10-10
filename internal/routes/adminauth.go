@@ -45,10 +45,13 @@ func (h *AdminAuthRoutes) Register(mux *http.ServeMux) {
 	mux.HandleFunc("/admin/auth/users/{id}", h.handleUser)
 }
 
-// handleChallenge serves the public keys and a one-time nonce.
+// handleChallenge serves the public keys and a one-time nonce. Both GET
+// (legacy/scripted clients) and POST (the admin UI) are accepted; POST is
+// preferred because responses to POST are never cached by CDNs or browsers,
+// and a cached challenge would reuse its single-use nonce.
 func (h *AdminAuthRoutes) handleChallenge(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodGet {
-		methodNotAllowed(w, "GET")
+	if r.Method != http.MethodGet && r.Method != http.MethodPost {
+		methodNotAllowed(w, "GET, POST")
 		return
 	}
 	challenge, err := h.challenges.Issue()
@@ -57,6 +60,11 @@ func (h *AdminAuthRoutes) handleChallenge(w http.ResponseWriter, r *http.Request
 		httperr.Write(w, http.StatusInternalServerError, "Internal server error", "internal_error", "internal_error")
 		return
 	}
+	// The challenge carries a single-use nonce: it must never be cached by
+	// browsers, CDNs or reverse proxies, otherwise every login would reuse
+	// the same nonce and all but the first would fail decryption.
+	w.Header().Set("Cache-Control", "no-store")
+	w.Header().Set("Pragma", "no-cache")
 	httperr.WriteJSON(w, http.StatusOK, challenge)
 }
 
@@ -164,6 +172,7 @@ func (h *AdminAuthRoutes) resolveCredentials(w http.ResponseWriter, body *loginB
 		creds, err := h.challenges.DecryptWebCrypto(body.Encrypted.Key, body.Encrypted.IV, body.Encrypted.Data)
 		if err != nil {
 			_ = db.RecordAudit("admin_login_failed", "encrypted_payload", ip)
+			slog.Warn("login payload decrypt failed", "scheme", "webcrypto", "ip", ip, "error", err)
 			decryptionFailed(w)
 			return util.Credentials{}, false
 		}
@@ -177,6 +186,7 @@ func (h *AdminAuthRoutes) resolveCredentials(w http.ResponseWriter, body *loginB
 		creds, err := h.challenges.DecryptBox(body.Box.PublicKey, body.Box.Nonce, body.Box.Data)
 		if err != nil {
 			_ = db.RecordAudit("admin_login_failed", "box_payload", ip)
+			slog.Warn("login payload decrypt failed", "scheme", "box", "ip", ip, "error", err)
 			decryptionFailed(w)
 			return util.Credentials{}, false
 		}

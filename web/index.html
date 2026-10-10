@@ -527,7 +527,7 @@
        storage key in sync with core/api.js. */
     (function () {
       try {
-        if (!sessionStorage.getItem("adminToken")) return;
+        if (!localStorage.getItem("adminToken") && !sessionStorage.getItem("adminToken")) return;
         document.getElementById("loginView").classList.add("hidden");
         for (const node of document.querySelectorAll(".app-view")) node.classList.remove("hidden");
       } catch (e) { /* storage unavailable: keep the login page */ }
