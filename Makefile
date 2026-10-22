@@ -19,7 +19,7 @@ ENV ?=
 
 .DEFAULT_GOAL := build
 
-.PHONY: all build run test test-v race cover vet fmt fmt-check tidy clean distclean release clean-dist help
+.PHONY: all build run test test-v race cover vet fmt fmt-check tidy licenses clean distclean release clean-dist help
 
 ## all: 编译并运行测试（提交前请用这个）
 all: build test
@@ -69,10 +69,50 @@ fmt-check:
 tidy:
 	$(GO) mod tidy
 
+## licenses: 汇编三方依赖许可证到 $(DIST)/THIRD_PARTY_LICENSES，并复制 LICENSE
+licenses:
+	@mkdir -p $(DIST)
+	@$(GO) mod download
+	@out="$(DIST)/THIRD_PARTY_LICENSES"; \
+	{ \
+		echo "Relay-Api $(VERSION) 三方依赖许可证"; \
+		echo "================================================================"; \
+		echo "由 make licenses 自动生成，请勿手工编辑。"; \
+		echo "本项目本身以 MIT 发布，见同目录 LICENSE；模块版本以 go.mod 为准。"; \
+		echo; \
+		for path in $$(sed -n 's/^[[:space:]]*\([^[:space:]]*\)[[:space:]]*v[^[:space:]]*.*/\1/p' go.mod); do \
+			info="$$($(GO) list -m -f '{{.Path}}@{{.Version}} {{.Dir}}' "$$path" 2>/dev/null)"; \
+			dir="$${info##* }"; \
+			module="$${info%% *}"; \
+			if [ -z "$$dir" ] || [ ! -d "$$dir" ]; then \
+				echo "缺少模块缓存：$$path（先运行 go mod download）" >&2; exit 1; \
+			fi; \
+			files=""; first=""; \
+			for f in "$$dir"/LICENSE* "$$dir"/LICENCE* "$$dir"/COPYING* "$$dir"/NOTICE*; do \
+				if [ -f "$$f" ]; then \
+					files="$$files $$f"; \
+					if [ -z "$$first" ]; then first="$$f"; fi; \
+				fi; \
+			done; \
+			if [ -z "$$first" ]; then echo "找不到许可证文件：$$path ($$dir)" >&2; exit 1; fi; \
+			label="原文如下"; \
+			if grep -q "Permission is hereby granted, free of charge" "$$first"; then label="MIT"; \
+			elif grep -q "Redistribution and use in source and binary forms" "$$first"; then label="BSD-3-Clause"; \
+			fi; \
+			echo "----------------------------------------------------------------"; \
+			echo "$$module"; \
+			echo "License: $$label"; \
+			echo "----------------------------------------------------------------"; \
+			for f in $$files; do echo "[$$(basename "$$f")]"; cat "$$f"; echo; done; \
+		done; \
+	} > "$$out"
+	@cp LICENSE $(DIST)/LICENSE
+	@echo "已生成 $(DIST)/THIRD_PARTY_LICENSES 与 $(DIST)/LICENSE"
+
 ## release: 交叉编译各平台发布包到 $(DIST)/，并生成 SHA256SUMS
 release:
 	@$(MAKE) --no-print-directory clean-dist
-	@mkdir -p $(DIST)
+	@$(MAKE) --no-print-directory licenses
 	@for platform in $(PLATFORMS); do \
 		os=$${platform%/*}; arch=$${platform#*/}; \
 		ext=""; if [ "$$os" = "windows" ]; then ext=".exe"; fi; \
@@ -80,11 +120,11 @@ release:
 		echo "==> $$os/$$arch"; \
 		CGO_ENABLED=0 GOOS=$$os GOARCH=$$arch $(GO) build $(BUILD_FLAGS) -o $(DIST)/$$name$$ext $(PKG) || exit 1; \
 		if [ "$$os" = "windows" ] && command -v zip >/dev/null 2>&1; then \
-			( cd $(DIST) && zip -q "$$name.zip" "$$name$$ext" ) || exit 1; \
+			( cd $(DIST) && zip -q "$$name.zip" "$$name$$ext" LICENSE THIRD_PARTY_LICENSES ) || exit 1; \
 			rm -f $(DIST)/$$name$$ext; \
 		else \
 			if [ "$$os" = "windows" ]; then echo "    未找到 zip，改用 tar.gz 打包"; fi; \
-			tar -C $(DIST) -czf $(DIST)/$$name.tar.gz "$$name$$ext" || exit 1; \
+			tar -C $(DIST) -czf $(DIST)/$$name.tar.gz "$$name$$ext" LICENSE THIRD_PARTY_LICENSES || exit 1; \
 			rm -f $(DIST)/$$name$$ext; \
 		fi; \
 	done
@@ -93,6 +133,7 @@ release:
 	if command -v sha256sum >/dev/null 2>&1; then echo "$$files" | tr ' ' '\\n' | xargs sha256sum > SHA256SUMS; \
 	else echo "$$files" | tr ' ' '\\n' | xargs shasum -a 256 > SHA256SUMS; fi
 	@echo "发布包已生成于 $(DIST)/ (VERSION=$(VERSION)):"; ls -1 $(DIST)
+	@echo "每个发布包内含二进制、LICENSE 与 THIRD_PARTY_LICENSES"
 
 ## clean-dist: 删除 $(DIST) 发布目录
 clean-dist:

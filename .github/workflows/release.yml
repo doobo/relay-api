@@ -105,7 +105,8 @@ jobs:
             echo "| --- | --- |"
             for f in dist/*; do
               name="$(basename "$f")"
-              [ "$name" = "SHA256SUMS" ] && continue
+              # 许可证文件是发布包内的附件，不是可下载的平台产物。
+              case "$name" in SHA256SUMS | LICENSE | THIRD_PARTY_LICENSES) continue ;; esac
               # 去掉打包扩展名后取最后两段作为 os/arch，兼容带 v 前缀且含连字符的版本号。
               stem="$(echo "$name" | sed -E 's/\.(tar\.gz|zip)$//')"
               platform="$(echo "$stem" | grep -oE '[^ -]+-[^ -]+$')"

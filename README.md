@@ -133,9 +133,29 @@ make clean-dist                       # 删除 dist/
 
 默认平台为 linux / darwin / windows × amd64 / arm64，产物命名 `relay-api-<version>-<os>-<arch>`：Unix 打包为 `.tar.gz`，Windows 在有 `zip` 命令时打包为 `.zip`（否则回退 `.tar.gz`），并生成 `SHA256SUMS` 校验文件。版本号通过 `-ldflags "-X main.version=..."` 注入，启动日志会打印该版本号。
 
+每个发布包内含二进制、`LICENSE` 与 `THIRD_PARTY_LICENSES`（三方依赖许可证原文，由 `make licenses` 从 `go.mod` 与模块缓存自动汇编，也可单独运行生成到 `dist/`）。
+
 ## 部署注意
 
 - `CGO_ENABLED=0` 静态编译（SQLite 驱动为纯 Go 的 `modernc.org/sqlite`）
 - 持久化 `DATABASE_PATH` 指向的目录，并同时保留 `SECRET_KEY_FILE`，二者需一起备份
 - 服务器层刻意不设置 `WriteTimeout`/`ReadTimeout`（长连接 SSE 与 `/free` 隧道需要），空闲控制由 `STREAM_IDLE_TIMEOUT_MS` 在处理器内完成
 - 反向代理需允许长连接并关闭响应缓冲（Nginx 参考：`proxy_buffering off;`），否则流式响应会被缓冲
+
+## 许可证
+
+本项目以 [MIT](LICENSE) 发布。
+
+三方依赖均为宽松协议，与 MIT 兼容；再分发二进制或源码时需保留各自的版权声明与免责声明。版本以 `go.mod` 为准。
+
+| 模块 | 协议 | 用途 |
+| --- | --- | --- |
+| `golang.org/x/crypto` | BSD-3-Clause | bcrypt 密码哈希、登录挑战的 nacl/box |
+| `golang.org/x/net` | BSD-3-Clause | `http2` 与 `h2c`（单端口明文 HTTP/2） |
+| `modernc.org/sqlite` | BSD-3-Clause | 纯 Go SQLite 驱动；内嵌的 SQLite 本体为 Public Domain |
+| `modernc.org/libc`、`modernc.org/mathutil`、`modernc.org/memory` | BSD-3-Clause | 间接依赖（`modernc.org/sqlite` 使用） |
+| `golang.org/x/sys`、`golang.org/x/text` | BSD-3-Clause | 间接依赖 |
+| `github.com/google/uuid`、`github.com/remyoudompheng/bigfft` | BSD-3-Clause | 间接依赖 |
+| `github.com/dustin/go-humanize`、`github.com/mattn/go-isatty`、`github.com/ncruces/go-strftime` | MIT | 间接依赖 |
+
+前端为原生 ES Module、无构建步骤，不含第三方运行时依赖；`web/` 下的代码随本项目一并按 MIT 发布。
