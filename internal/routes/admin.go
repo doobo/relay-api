@@ -195,7 +195,7 @@ func (h *AdminResources) createProvider(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 	if !validProviderType(body.Type) {
-		invalidRequest(w, "type must be openai, anthropic, compatible or openai-responses")
+		invalidRequest(w, "type must be openai, anthropic, compatible, openai-responses or responses")
 		return
 	}
 	if _, err := util.ValidateUpstreamURL(body.BaseURL); err != nil {
@@ -272,7 +272,7 @@ func (h *AdminResources) updateProvider(w http.ResponseWriter, r *http.Request, 
 		return
 	}
 	if body.Type != nil && !validProviderType(*body.Type) {
-		invalidRequest(w, "type must be openai, anthropic, compatible or openai-responses")
+		invalidRequest(w, "type must be openai, anthropic, compatible, openai-responses or responses")
 		return
 	}
 	if body.BaseURL != nil {
@@ -373,7 +373,8 @@ func (h *AdminResources) deleteProvider(w http.ResponseWriter, r *http.Request, 
 }
 
 func validProviderType(kind string) bool {
-	return kind == "openai" || kind == "anthropic" || kind == "compatible" || kind == "openai-responses"
+	return kind == "openai" || kind == "anthropic" || kind == "compatible" ||
+		kind == "openai-responses" || kind == "responses"
 }
 
 // providerHeaders decodes the stored custom-header JSON object.

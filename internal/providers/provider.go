@@ -1,5 +1,6 @@
 // Package providers adapts OpenAI-format chat requests onto the different
-// upstream wire formats (openai, anthropic, compatible, openai-responses).
+// upstream wire formats (openai, anthropic, compatible, openai-responses,
+// responses).
 package providers
 
 import (
@@ -32,6 +33,9 @@ type Request struct {
 	// RawBody is the original client body, forwarded as-is so parameters the
 	// gateway does not model (tools, response_format, top_p, ...) survive.
 	RawBody map[string]any
+	// RawBytes is the exact buffered client body. ResponsesPassthrough uses it
+	// to avoid re-encoding the JSON, preserving formatting and number text.
+	RawBytes []byte
 	// ClientHeaders are the lowercased client request headers, available to
 	// custom provider headers through ${name}.
 	ClientHeaders map[string]string
@@ -100,7 +104,7 @@ func New(cfg Config) Provider {
 	switch cfg.Type {
 	case "anthropic":
 		return &Anthropic{OpenAI: OpenAI{cfg: cfg}}
-	case "openai-responses":
+	case "openai-responses", "responses":
 		return &Responses{OpenAI: OpenAI{cfg: cfg}}
 	default:
 		// "openai" and "compatible" share the exact same wire format.

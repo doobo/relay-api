@@ -29,6 +29,37 @@ func (p *Responses) headers(request Request) map[string]string {
 	return p.OpenAI.headers(request)
 }
 
+// ResponsesPassthrough forwards an already-Responses-format request to the
+// upstream unchanged. It is used by the `responses` provider type so a
+// Responses client (Codex) can skip the Responses -> Chat -> Responses double
+// conversion and stream the upstream SSE body back verbatim.
+func ResponsesPassthrough(ctx context.Context, cfg Config, request Request) (*http.Response, error) {
+	payload := request.RawBytes
+	if len(payload) == 0 {
+		encoded, err := json.Marshal(request.RawBody)
+		if err != nil {
+			return nil, err
+		}
+		payload = encoded
+	}
+	headers := map[string]string{"content-type": "application/json"}
+	if cfg.APIKey != nil && *cfg.APIKey != "" {
+		headers["authorization"] = "Bearer " + *cfg.APIKey
+	}
+	headers = applyCustomHeaders(headers, cfg, request)
+
+	timeout := cfg.RequestTimeoutMs
+	if request.Stream {
+		timeout = 0
+	}
+	return util.FetchUpstream(ctx, strings.TrimRight(cfg.BaseURL, "/")+"/responses", util.FetchOptions{
+		Method:    http.MethodPost,
+		Headers:   headers,
+		Body:      bytes.NewReader(payload),
+		TimeoutMs: timeout,
+	})
+}
+
 // toResponsesBody converts an OpenAI chat request into a Responses request.
 func (p *Responses) toResponsesBody(request Request, stream bool) map[string]any {
 	body := map[string]any{

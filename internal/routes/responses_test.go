@@ -275,3 +275,130 @@ func TestResponsesCompatibility(t *testing.T) {
 		}
 	})
 }
+
+func TestResponsesPassthroughProvider(t *testing.T) {
+	t.Setenv("DATABASE_PATH", filepath.Join(t.TempDir(), "gateway.db"))
+	t.Setenv("SECRET_KEY_FILE", filepath.Join(t.TempDir(), ".secret-key"))
+	t.Setenv("SECRET_ENCRYPTION_KEY", "")
+	t.Setenv("ALLOW_PRIVATE_UPSTREAMS", "1")
+
+	if _, err := db.Open(filepath.Join(t.TempDir(), "passthrough.db")); err != nil {
+		t.Fatalf("open db: %v", err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	if err := db.Migrate(db.Get()); err != nil {
+		t.Fatalf("migrate: %v", err)
+	}
+	secrets, err := util.NewSecretBox()
+	if err != nil {
+		t.Fatalf("secret box: %v", err)
+	}
+
+	const jsonPayload = `{"id":"resp_up","object":"response","status":"completed","output":[{"type":"message","role":"assistant","content":[{"type":"output_text","text":"passthrough"}]}],"usage":{"input_tokens":1,"output_tokens":2,"total_tokens":3}}`
+	const ssePayload = "event: response.created\n" +
+		"data: {\"type\":\"response.created\",\"response\":{\"id\":\"resp_up\",\"status\":\"in_progress\"}}\n\n" +
+		"event: response.output_text.delta\n" +
+		"data: {\"type\":\"response.output_text.delta\",\"delta\":\"passthrough\"}\n\n" +
+		"event: response.completed\n" +
+		"data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_up\",\"status\":\"completed\",\"usage\":{\"input_tokens\":1,\"output_tokens\":2,\"total_tokens\":3}}}\n\n"
+
+	var (
+		mu          sync.Mutex
+		received    map[string]any
+		receivedRaw string
+	)
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		raw, _ := io.ReadAll(r.Body)
+		var body map[string]any
+		_ = json.Unmarshal(raw, &body)
+		mu.Lock()
+		received = body
+		receivedRaw = string(raw)
+		mu.Unlock()
+		if _, isChat := body["messages"]; isChat {
+			http.Error(w, "chat conversion must not happen for a responses provider", http.StatusBadRequest)
+			return
+		}
+		stream, _ := body["stream"].(bool)
+		if stream {
+			w.Header().Set("content-type", "text/event-stream")
+			_, _ = io.WriteString(w, ssePayload)
+			return
+		}
+		w.Header().Set("content-type", "application/json")
+		_, _ = io.WriteString(w, jsonPayload)
+	}))
+	defer upstream.Close()
+
+	providerID := mustProvider(t, "native-responses", "responses", upstream.URL)
+	if _, err := db.CreateModel("native", providerID, "upstream-model", true, 100); err != nil {
+		t.Fatalf("create model: %v", err)
+	}
+	fullKey := "sk-native-responses-1"
+	if _, err := db.CreateAPIKey(db.NewAPIKey{
+		Name: "test", Prefix: fullKey[:8], KeyHash: util.SHA256Hex(fullKey),
+		Scope: "ai", RateLimit: 10000,
+	}); err != nil {
+		t.Fatalf("create key: %v", err)
+	}
+
+	cfg := config.Load()
+	gw := NewGateway(cfg, router.NewResolver(secrets))
+	mux := http.NewServeMux()
+	gw.Register(mux)
+	mux.HandleFunc("/", func(w http.ResponseWriter, _ *http.Request) { httperr.NotFound(w) })
+	handler := middleware.RequestLog(middleware.BodyParser(cfg.RequestSizeLimitBytes)(middleware.APIKeyAuth(middleware.NewRateLimiter())(middleware.AISession(mux))))
+
+	bodyFor := func(stream bool) string {
+		encoded, _ := json.Marshal(map[string]any{
+			"model":        "native",
+			"instructions": "be terse",
+			"input": []any{map[string]any{
+				"type": "message", "role": "user",
+				"content": []any{map[string]any{"type": "input_text", "text": "hi"}},
+			}},
+			"tools":  []any{map[string]any{"type": "custom", "name": "apply_patch"}},
+			"stream": stream,
+		})
+		return string(encoded)
+	}
+	do := func(t *testing.T, stream bool) *httptest.ResponseRecorder {
+		t.Helper()
+		request := httptest.NewRequest(http.MethodPost, "/v1/responses", strings.NewReader(bodyFor(stream)))
+		request.Header.Set("Authorization", "Bearer "+fullKey)
+		request.Header.Set("content-type", "application/json")
+		recorder := httptest.NewRecorder()
+		handler.ServeHTTP(recorder, request)
+		return recorder
+	}
+
+	t.Run("non-stream body is forwarded verbatim", func(t *testing.T) {
+		recorder := do(t, false)
+		if recorder.Code != http.StatusOK {
+			t.Fatalf("status = %d, body = %s", recorder.Code, recorder.Body.String())
+		}
+		if strings.TrimSpace(recorder.Body.String()) != jsonPayload {
+			t.Fatalf("body was rewritten:\n%s", recorder.Body.String())
+		}
+		mu.Lock()
+		body := received
+		raw := receivedRaw
+		mu.Unlock()
+		if body["instructions"] != "be terse" || body["input"] == nil {
+			t.Fatalf("original Responses body not forwarded: %#v", body)
+		}
+		if raw != bodyFor(false) {
+			t.Fatalf("raw body not preserved:\n got %s\nwant %s", raw, bodyFor(false))
+		}
+	})
+
+	t.Run("stream is forwarded verbatim", func(t *testing.T) {
+		recorder := do(t, true)
+		if recorder.Code != http.StatusOK {
+			t.Fatalf("status = %d, body = %s", recorder.Code, recorder.Body.String())
+		}
+		if recorder.Body.String() != ssePayload {
+			t.Fatalf("stream was rewritten:\n%s", recorder.Body.String())
+		}
+	})
+}

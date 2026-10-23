@@ -48,10 +48,23 @@ func (g *Gateway) responses(w http.ResponseWriter, r *http.Request) {
 	}
 	stream, _ := rawBody["stream"].(bool)
 
-	chatBody, customTools, err := responsesToChatRequest(rawBody)
-	if err != nil {
-		invalidRequest(w, err.Error())
-		return
+	// Conversion to chat is lazy: a route served by a `responses` provider
+	// forwards the original body untouched and never pays for the translation.
+	var (
+		chatBody    map[string]any
+		customTools map[string]bool
+		converted   bool
+	)
+	ensureChatBody := func() (map[string]any, map[string]bool, error) {
+		if converted {
+			return chatBody, customTools, nil
+		}
+		body, custom, err := responsesToChatRequest(rawBody)
+		if err != nil {
+			return nil, nil, err
+		}
+		chatBody, customTools, converted = body, custom, true
+		return chatBody, customTools, nil
 	}
 
 	routes, err := g.resolver.Resolve(model)
@@ -88,10 +101,8 @@ func (g *Gateway) responses(w http.ResponseWriter, r *http.Request) {
 	}
 	var upstreamHeaders *string
 
-	providerRequest := providers.Request{
-		Model:         routes[0].UpstreamModel,
+	baseRequest := providers.Request{
 		Stream:        stream,
-		RawBody:       chatBody,
 		ClientHeaders: clientHeaders,
 		Session:       middleware.AISessionFrom(r.Context()),
 		OnUpstreamHeaders: func(headers map[string]string) {
@@ -108,9 +119,59 @@ func (g *Gateway) responses(w http.ResponseWriter, r *http.Request) {
 			httperr.Write(w, http.StatusInternalServerError, err.Error(), "internal_error", "provider_key_undecryptable")
 			return
 		}
+		meta := responsesMeta{
+			requestID:       requestID,
+			apiKeyID:        apiKeyID,
+			model:           model,
+			provider:        route.Provider.Name,
+			startedAt:       startedAt,
+			requestHeaders:  requestHeaders,
+			upstreamHeaders: upstreamHeaders,
+			stream:          stream,
+		}
+
+		// A `responses` provider speaks the Responses protocol natively: forward
+		// the client body and return the upstream body/SSE verbatim.
+		if route.Provider.Type == "responses" {
+			passCtx, cancelPass := context.WithCancel(r.Context())
+			request := baseRequest
+			request.Model = route.UpstreamModel
+			request.RawBody = rawBody
+			request.RawBytes = middleware.RequestBody(r.Context())
+			upstream, err := providers.ResponsesPassthrough(passCtx, providerCfg, request)
+			if err != nil {
+				cancelPass()
+				if shouldFailover(err) {
+					lastErr = err
+					continue
+				}
+				g.writeUpstreamError(w, r, err, apiKeyID, model, route.Provider.Name, startedAt, stream, requestHeaders, upstreamHeaders)
+				return
+			}
+			if upstream.StatusCode < 200 || upstream.StatusCode >= 300 {
+				body := util.ReadBodyLimited(upstream, 500)
+				cancelPass()
+				statusErr := &util.UpstreamStatusError{Status: upstream.StatusCode, Body: body}
+				if util.IsFailoverStatus(upstream.StatusCode) {
+					lastErr = statusErr
+					continue
+				}
+				g.writeUpstreamError(w, r, statusErr, apiKeyID, model, route.Provider.Name, startedAt, stream, requestHeaders, upstreamHeaders)
+				return
+			}
+			g.writeResponsesPassthrough(w, r, upstream, cancelPass, meta)
+			return
+		}
+
+		body, custom, err := ensureChatBody()
+		if err != nil {
+			invalidRequest(w, err.Error())
+			return
+		}
 		provider := providers.New(providerCfg)
-		request := providerRequest
+		request := baseRequest
 		request.Model = route.UpstreamModel
+		request.RawBody = body
 
 		if stream {
 			streamCtx, cancelStream := context.WithCancel(r.Context())
@@ -124,15 +185,7 @@ func (g *Gateway) responses(w http.ResponseWriter, r *http.Request) {
 				g.writeUpstreamError(w, r, err, apiKeyID, model, route.Provider.Name, startedAt, true, requestHeaders, upstreamHeaders)
 				return
 			}
-			g.writeResponsesStream(w, r, upstream, cancelStream, rawBody, customTools, responsesMeta{
-				requestID:       requestID,
-				apiKeyID:        apiKeyID,
-				model:           model,
-				provider:        route.Provider.Name,
-				startedAt:       startedAt,
-				requestHeaders:  requestHeaders,
-				upstreamHeaders: upstreamHeaders,
-			})
+			g.writeResponsesStream(w, r, upstream, cancelStream, rawBody, custom, meta)
 			return
 		}
 
@@ -146,7 +199,7 @@ func (g *Gateway) responses(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 
-		output, usage := buildResponsesOutput(result, customTools)
+		output, usage := buildResponsesOutput(result, custom)
 		responseID := "resp_" + randomResponsesID()
 		payload := buildResponsesResponse(responseID, model, "completed", output, usage, rawBody, time.Now().Unix())
 		payload["end_turn"] = len(result.Message.ToolCalls) == 0
@@ -513,6 +566,7 @@ type responsesMeta struct {
 	startedAt       time.Time
 	requestHeaders  *string
 	upstreamHeaders *string
+	stream          bool
 }
 
 func buildResponsesOutput(result *providers.Result, customTools map[string]bool) ([]any, responsesUsage) {
@@ -955,6 +1009,165 @@ readLoop:
 		CompletionTokens: usage.output,
 		TotalTokens:      usage.total,
 	}, meta.startedAt, http.StatusOK, true, nil, meta.requestHeaders, meta.upstreamHeaders)
+}
+
+// responsesUsagePayload mirrors the usage object both in a non-streaming
+// Responses body and inside response.completed.
+type responsesUsagePayload struct {
+	InputTokens  int `json:"input_tokens"`
+	OutputTokens int `json:"output_tokens"`
+	TotalTokens  int `json:"total_tokens"`
+}
+
+// writeResponsesPassthrough streams an upstream Responses body back unchanged.
+// It only parses usage for accounting; request/response bodies and SSE events
+// are never rewritten.
+func (g *Gateway) writeResponsesPassthrough(w http.ResponseWriter, r *http.Request, upstream *http.Response, cancelUpstream context.CancelFunc, meta responsesMeta) {
+	defer upstream.Body.Close()
+	defer cancelUpstream()
+
+	writeUpstreamHeaders(w, upstream.Header, meta.requestID)
+	// FilterResponseHeaders normally drops content-encoding because the chat
+	// path re-encodes bodies. Here the bytes are forwarded verbatim, so keep an
+	// encoding the transport did not already decode.
+	if encoding := upstream.Header.Get("content-encoding"); encoding != "" {
+		w.Header().Set("content-encoding", encoding)
+	}
+	w.WriteHeader(upstream.StatusCode)
+
+	promptTokens, completionTokens, totalTokens := 0, 0, 0
+	record := func(status int, errMsg *string) {
+		usage := &providers.Usage{
+			PromptTokens:     promptTokens,
+			CompletionTokens: completionTokens,
+			TotalTokens:      totalTokens,
+		}
+		if usage.TotalTokens == 0 {
+			usage.TotalTokens = usage.PromptTokens + usage.CompletionTokens
+		}
+		g.recordAI(meta.requestID, meta.apiKeyID, meta.model, meta.provider, usage, meta.startedAt, status, meta.stream, errMsg, meta.requestHeaders, meta.upstreamHeaders)
+	}
+
+	if !meta.stream {
+		body, err := io.ReadAll(upstream.Body)
+		if err != nil {
+			message := err.Error()
+			record(http.StatusBadGateway, &message)
+			return
+		}
+		_, _ = w.Write(body)
+		var payload struct {
+			Usage *responsesUsagePayload `json:"usage"`
+		}
+		if json.Unmarshal(body, &payload) == nil && payload.Usage != nil {
+			promptTokens = payload.Usage.InputTokens
+			completionTokens = payload.Usage.OutputTokens
+			totalTokens = payload.Usage.TotalTokens
+		}
+		record(upstream.StatusCode, nil)
+		return
+	}
+
+	flusher, _ := w.(http.Flusher)
+	streamDone := false
+	streamFailed := false
+	parser := util.NewSSEParser(func(event util.SSEEvent) {
+		if event.Data == "[DONE]" {
+			streamDone = true
+			return
+		}
+		// A Responses stream terminates with one of these events. Stop reading
+		// even if the upstream keeps the SSE connection open.
+		if strings.Contains(event.Data, `"type":"response.completed"`) ||
+			strings.Contains(event.Data, `"type": "response.completed"`) {
+			streamDone = true
+		}
+		if strings.Contains(event.Data, `"type":"response.failed"`) ||
+			strings.Contains(event.Data, `"type": "response.failed"`) {
+			streamDone = true
+			streamFailed = true
+		}
+		if !strings.Contains(event.Data, `"usage"`) {
+			return
+		}
+		var payload struct {
+			Usage    *responsesUsagePayload `json:"usage"`
+			Response *struct {
+				Usage *responsesUsagePayload `json:"usage"`
+			} `json:"response"`
+		}
+		if json.Unmarshal([]byte(event.Data), &payload) != nil {
+			return
+		}
+		usage := payload.Usage
+		if payload.Response != nil && payload.Response.Usage != nil {
+			usage = payload.Response.Usage
+		}
+		if usage == nil {
+			return
+		}
+		promptTokens = usage.InputTokens
+		completionTokens = usage.OutputTokens
+		totalTokens = usage.TotalTokens
+	})
+
+	idle := time.Duration(g.cfg.StreamIdleTimeoutMs) * time.Millisecond
+	if idle <= 0 {
+		idle = 24 * time.Hour
+	}
+	var idleTimedOut atomic.Bool
+	timer := time.AfterFunc(idle, func() {
+		idleTimedOut.Store(true)
+		cancelUpstream()
+	})
+	defer timer.Stop()
+
+	status := upstream.StatusCode
+	var failure *string
+	buffer := make([]byte, 32*1024)
+	for {
+		n, readErr := upstream.Body.Read(buffer)
+		if n > 0 {
+			timer.Reset(idle)
+			if _, err := w.Write(buffer[:n]); err != nil {
+				return
+			}
+			if flusher != nil {
+				flusher.Flush()
+			}
+			parser.Push(string(buffer[:n]))
+			if streamDone {
+				if streamFailed {
+					status = http.StatusBadGateway
+					message := "upstream response failed"
+					failure = &message
+				}
+				break
+			}
+		}
+		if readErr == nil {
+			continue
+		}
+		switch {
+		case idleTimedOut.Load():
+			status = http.StatusGatewayTimeout
+			message := "upstream stream idle timeout"
+			failure = &message
+			parser.Flush()
+		case r.Context().Err() != nil:
+			// Client went away; nothing left to record for.
+			return
+		case errors.Is(readErr, io.EOF):
+			parser.Flush()
+		default:
+			status = http.StatusBadGateway
+			message := readErr.Error()
+			failure = &message
+			parser.Flush()
+		}
+		break
+	}
+	record(status, failure)
 }
 
 // randomResponsesID returns a short hex id for response/output items.

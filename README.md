@@ -24,10 +24,11 @@ OpenAI 兼容的 API 中转网关，后端使用 Go 实现，前端管理界面�
 | `openai` / `compatible` | `<baseUrl>/chat/completions` | 标准 Chat Completions，`compatible` 与 `openai` 完全相同 |
 | `anthropic` | `<baseUrl>/messages` | Anthropic Messages，自动转换 OpenAI 请求/响应及 SSE |
 | `openai-responses` | `<baseUrl>/responses` | OpenAI Responses API，自动转换文本、图片、工具调用、推理内容和 SSE |
+| `responses` | `<baseUrl>/responses` | Responses 原生透传：`/v1/responses` 的请求体、响应体与 SSE 原样转发，不做 Chat 转换，速度最优 |
 
 例如 OpenCode Go 的 GPT / Muse 模型只提供 Responses API：Provider 的 `baseUrl` 填 `https://opencode.ai/inference/go/openai/v1`，类型选 `openai-responses`；DeepSeek 等 Chat Completions 模型继续使用 `openai` / `compatible`。
 
-Codex CLI 可以直接使用 Responses 协议：`base_url = "https://<relay>/v1"`、`wire_api = "responses"`，请求会命中本服务的 `/v1/responses`。
+Codex CLI 可以直接使用 Responses 协议：`base_url = "https://<relay>/v1"`、`wire_api = "responses"`，请求会命中本服务的 `/v1/responses`。若该模型路由的 Provider 类型是 `responses`，请求和 SSE 会直接透传到上游；其他类型则自动转换为 Chat Completions 管线。
 
 ## 快速开始
 
