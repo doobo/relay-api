@@ -6,7 +6,8 @@ OpenAI 兼容的 API 中转网关，后端使用 Go 实现，前端管理界面�
 
 ## 功能
 
-- OpenAI 兼容接口：`/v1/models`、`/v1/chat/completions`，支持 SSE 流式响应
+- OpenAI 兼容接口：`/v1/models`、`/v1/chat/completions`、`/v1/responses`，支持 SSE 流式响应
+- `/v1/responses` 兼容层：把 Responses 请求（Codex CLI 默认使用的 `wire_api = "responses"`）转换为内部 Chat Completions 管线，并回传 Responses 输出项与事件（文本、推理、function/custom 工具调用）
 - 多上游管理：provider / model / model-route（优先级 + 故障转移）配置
 - Provider 协议适配：`openai` / `compatible`（Chat Completions）、`anthropic`（Messages）、`openai-responses`（Responses API）
 - Provider 自定义请求头：`${客户端header}` 引入客户端值，`${_ai_session}` 引入解析出的用户会话标识
@@ -25,6 +26,8 @@ OpenAI 兼容的 API 中转网关，后端使用 Go 实现，前端管理界面�
 | `openai-responses` | `<baseUrl>/responses` | OpenAI Responses API，自动转换文本、图片、工具调用、推理内容和 SSE |
 
 例如 OpenCode Go 的 GPT / Muse 模型只提供 Responses API：Provider 的 `baseUrl` 填 `https://opencode.ai/inference/go/openai/v1`，类型选 `openai-responses`；DeepSeek 等 Chat Completions 模型继续使用 `openai` / `compatible`。
+
+Codex CLI 可以直接使用 Responses 协议：`base_url = "https://<relay>/v1"`、`wire_api = "responses"`，请求会命中本服务的 `/v1/responses`。
 
 ## 快速开始
 

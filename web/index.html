@@ -259,9 +259,38 @@
 
     <!-- Usage -->
     <section id="tab-usage" class="tab">
+      <!-- Key detail view: shown when the Usage tab is opened for one key, or
+           when a key is picked in the filter. -->
+      <div id="keyUsagePanel" class="panel hidden">
+        <div class="panel-head">
+          <h2 id="keyUsageTitle">API Key Usage</h2>
+          <button type="button" id="keyUsageClear" class="secondary small">Show all keys</button>
+        </div>
+        <div class="cards">
+          <div class="card">
+            <div class="card-label">Today</div>
+            <div class="card-value" id="keyUsageDailyRequests">-</div>
+            <div class="hint" id="keyUsageDailyTokens">-</div>
+          </div>
+          <div class="card">
+            <div class="card-label">This Week</div>
+            <div class="card-value" id="keyUsageWeeklyRequests">-</div>
+            <div class="hint" id="keyUsageWeeklyTokens">-</div>
+          </div>
+          <div class="card">
+            <div class="card-label">This Month</div>
+            <div class="card-value" id="keyUsageMonthlyRequests">-</div>
+            <div class="hint" id="keyUsageMonthlyTokens">-</div>
+          </div>
+        </div>
+        <p class="hint" id="keyUsageMeta"></p>
+      </div>
       <div class="panel">
         <h2>Recent Usage</h2>
         <form id="usageFilters" class="form-inline">
+          <select id="usageFilterKey" aria-label="Filter by API key">
+            <option value="">all keys</option>
+          </select>
           <input id="usageFilterModel" placeholder="model" aria-label="Filter by model" autocomplete="off">
           <input id="usageFilterProvider" placeholder="provider / URL" aria-label="Filter by provider name or upstream URL" autocomplete="off">
           <select id="usageFilterKind" aria-label="Filter by kind">
@@ -275,7 +304,7 @@
         </form>
         <div class="table-wrap">
           <table id="usageTable">
-            <thead><tr><th>Time</th><th>Request ID</th><th>Kind</th><th>Model/Config</th><th>Provider</th><th>Tokens</th><th>Status</th><th>Latency</th><th></th></tr></thead>
+            <thead><tr><th>Time</th><th>Request ID</th><th>Kind</th><th>API Key</th><th>Model/Config</th><th>Provider</th><th>Tokens</th><th>Status</th><th>Latency</th><th></th></tr></thead>
             <tbody></tbody>
           </table>
         </div>

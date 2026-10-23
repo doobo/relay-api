@@ -49,6 +49,7 @@ func (h *AdminResources) Register(mux *http.ServeMux) {
 	mux.HandleFunc("/admin/api-keys", h.apiKeys)
 	mux.HandleFunc("/admin/api-keys/{id}", h.apiKeyByID)
 	mux.HandleFunc("/admin/api-keys/{id}/configs", h.apiKeyConfigs)
+	mux.HandleFunc("/admin/api-keys/{id}/stats", h.apiKeyStats)
 	mux.HandleFunc("/admin/api-configs", h.apiConfigs)
 	mux.HandleFunc("/admin/api-configs/{id}", h.apiConfigByID)
 	mux.HandleFunc("/admin/api-configs/{id}/stats", h.apiConfigStats)
@@ -1336,6 +1337,11 @@ func (h *AdminResources) usage(w http.ResponseWriter, r *http.Request) {
 			filters.Since = &value
 		}
 	}
+	if raw := query.Get("api_key_id"); raw != "" {
+		if value, err := strconv.ParseInt(raw, 10, 64); err == nil {
+			filters.APIKeyID = &value
+		}
+	}
 	entries, err := db.ListUsageLogs(filters)
 	if err != nil {
 		internalError(w, "list usage logs", err)
@@ -1596,6 +1602,65 @@ func (h *AdminResources) apiKeyConfigs(w http.ResponseWriter, r *http.Request) {
 		data = append(data, configRefDTO{ID: config.ID, Name: config.Name, Route: config.Route})
 	}
 	httperr.WriteJSON(w, http.StatusOK, map[string]any{"data": data})
+}
+
+// apiKeyQuotaPeriodDTO is one quota window (day/week/month) for a key.
+type apiKeyQuotaPeriodDTO struct {
+	UsedRequests int `json:"used_requests"`
+	UsedTokens   int `json:"used_tokens"`
+	RequestLimit int `json:"request_limit"`
+	TokenLimit   int `json:"token_limit"`
+}
+
+// apiKeyStatsDTO is the key detail view: the key plus its current-period usage.
+type apiKeyStatsDTO struct {
+	Key     apiKeyDTO            `json:"key"`
+	Daily   apiKeyQuotaPeriodDTO `json:"daily"`
+	Weekly  apiKeyQuotaPeriodDTO `json:"weekly"`
+	Monthly apiKeyQuotaPeriodDTO `json:"monthly"`
+}
+
+// apiKeyStats serves GET /admin/api-keys/:id/stats. The dashboard and the
+// Usage tab use it to show a key's day/week/month usage against its quotas.
+func (h *AdminResources) apiKeyStats(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		methodNotAllowed(w, "GET")
+		return
+	}
+	id, ok := pathID(r)
+	if !ok {
+		invalidRequest(w, "Invalid id")
+		return
+	}
+	key, err := db.GetAPIKey(id)
+	if err != nil {
+		internalError(w, "get api key", err)
+		return
+	}
+	if key == nil {
+		httperr.NotFound(w)
+		return
+	}
+	usage, err := db.APIKeyQuotaUsage(id)
+	if err != nil {
+		internalError(w, "api key usage", err)
+		return
+	}
+	httperr.WriteJSON(w, http.StatusOK, apiKeyStatsDTO{
+		Key: toAPIKeyDTO(*key),
+		Daily: apiKeyQuotaPeriodDTO{
+			UsedRequests: usage.DayRequests, UsedTokens: usage.DayTokens,
+			RequestLimit: key.DailyRequestLimit, TokenLimit: key.DailyTokenLimit,
+		},
+		Weekly: apiKeyQuotaPeriodDTO{
+			UsedRequests: usage.WeekRequests, UsedTokens: usage.WeekTokens,
+			RequestLimit: key.WeeklyRequestLimit, TokenLimit: key.WeeklyTokenLimit,
+		},
+		Monthly: apiKeyQuotaPeriodDTO{
+			UsedRequests: usage.MonthRequests, UsedTokens: usage.MonthTokens,
+			RequestLimit: key.MonthlyRequestLimit, TokenLimit: key.MonthlyTokenLimit,
+		},
+	})
 }
 
 // apiConfigStats serves GET /admin/api-configs/:id/stats.

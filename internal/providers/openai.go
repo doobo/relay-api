@@ -96,6 +96,8 @@ func (p *OpenAI) Chat(ctx context.Context, request Request) (*Result, error) {
 			result.Message.Role = choice.Message.Role
 		}
 		result.Message.Content = choice.Message.Content
+		result.Message.ReasoningContent = choice.Message.ReasoningContent
+		result.Message.ToolCalls = choice.Message.ToolCalls
 		result.FinishReason = choice.FinishReason
 	}
 	return result, nil

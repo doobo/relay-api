@@ -399,6 +399,81 @@ func TestAdminProviderHeaders(t *testing.T) {
 	})
 }
 
+func TestAdminAPIKeyStatsAndUsageFilter(t *testing.T) {
+	harness := newAdminHarness(t)
+
+	key, err := db.CreateAPIKey(db.NewAPIKey{
+		Name: "key-one", Prefix: "sk-one", KeyHash: "hash-one", Scope: "both",
+		DailyRequestLimit: 10, DailyTokenLimit: 1000,
+		WeeklyRequestLimit: 20, WeeklyTokenLimit: 2000,
+		MonthlyRequestLimit: 30, MonthlyTokenLimit: 3000,
+	})
+	if err != nil {
+		t.Fatalf("create key: %v", err)
+	}
+	other, err := db.CreateAPIKey(db.NewAPIKey{
+		Name: "key-two", Prefix: "sk-two", KeyHash: "hash-two", Scope: "both",
+	})
+	if err != nil {
+		t.Fatalf("create other key: %v", err)
+	}
+
+	status := http.StatusOK
+	keyID, otherID := key.ID, other.ID
+	if err := db.RecordUsage(db.UsageRecord{
+		RequestID: "r1", APIKeyID: &keyID, Kind: "ai", InputTokens: 3, OutputTokens: 4, Status: &status,
+	}); err != nil {
+		t.Fatalf("record usage: %v", err)
+	}
+	if err := db.RecordUsage(db.UsageRecord{
+		RequestID: "r2", APIKeyID: &otherID, Kind: "ai", InputTokens: 9, OutputTokens: 9, Status: &status,
+	}); err != nil {
+		t.Fatalf("record other usage: %v", err)
+	}
+
+	t.Run("usage filter by key", func(t *testing.T) {
+		recorder := harness.call(t, http.MethodGet, "/admin/usage?api_key_id="+itoa(key.ID), "")
+		if recorder.Code != http.StatusOK {
+			t.Fatalf("status = %d, body = %s", recorder.Code, recorder.Body.String())
+		}
+		var body struct {
+			Data []usageLogDTO `json:"data"`
+		}
+		decodeInto(t, recorder, &body)
+		if len(body.Data) != 1 || body.Data[0].RequestID != "r1" {
+			t.Fatalf("unexpected filtered usage: %+v", body.Data)
+		}
+	})
+
+	t.Run("key stats", func(t *testing.T) {
+		recorder := harness.call(t, http.MethodGet, "/admin/api-keys/"+itoa(key.ID)+"/stats", "")
+		if recorder.Code != http.StatusOK {
+			t.Fatalf("status = %d, body = %s", recorder.Code, recorder.Body.String())
+		}
+		var stats apiKeyStatsDTO
+		decodeInto(t, recorder, &stats)
+		if stats.Key.ID != key.ID || stats.Key.Name != "key-one" {
+			t.Fatalf("unexpected key: %+v", stats.Key)
+		}
+		if stats.Daily.UsedRequests != 1 || stats.Daily.UsedTokens != 7 {
+			t.Fatalf("daily usage = %+v", stats.Daily)
+		}
+		if stats.Daily.RequestLimit != 10 || stats.Daily.TokenLimit != 1000 {
+			t.Fatalf("daily limits = %+v", stats.Daily)
+		}
+		if stats.Weekly.UsedRequests != 1 || stats.Monthly.UsedRequests != 1 {
+			t.Fatalf("week/month usage = %+v / %+v", stats.Weekly, stats.Monthly)
+		}
+	})
+
+	t.Run("unknown key is 404", func(t *testing.T) {
+		recorder := harness.call(t, http.MethodGet, "/admin/api-keys/9999/stats", "")
+		if recorder.Code != http.StatusNotFound {
+			t.Fatalf("status = %d", recorder.Code)
+		}
+	})
+}
+
 func itoa(value int64) string {
 	return strconv.FormatInt(value, 10)
 }

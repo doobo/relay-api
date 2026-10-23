@@ -41,6 +41,8 @@ type UsageFilters struct {
 	Kind     string
 	Status   *int
 	Since    *int64
+	// APIKeyID narrows to one client key (nil = every key).
+	APIKeyID *int64
 }
 
 const usageLogColumns = `id, request_id, api_key_id, kind, model, provider, api_config_id, target_url,
@@ -114,8 +116,8 @@ func GetUsageLog(id int64) (*UsageLogRow, error) {
 
 // ListUsageLogs returns usage rows newest-first, honoring the given filters.
 func ListUsageLogs(filters UsageFilters) ([]UsageLogRow, error) {
-	conditions := make([]string, 0, 5)
-	params := make([]any, 0, 8)
+	conditions := make([]string, 0, 6)
+	params := make([]any, 0, 9)
 	if filters.Model != "" {
 		conditions = append(conditions, "model = ?")
 		params = append(params, filters.Model)
@@ -138,6 +140,10 @@ func ListUsageLogs(filters UsageFilters) ([]UsageLogRow, error) {
 	if filters.Since != nil {
 		conditions = append(conditions, "created_at >= ?")
 		params = append(params, *filters.Since)
+	}
+	if filters.APIKeyID != nil {
+		conditions = append(conditions, "api_key_id = ?")
+		params = append(params, *filters.APIKeyID)
 	}
 	where := ""
 	if len(conditions) > 0 {

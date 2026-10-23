@@ -20,6 +20,7 @@ import {
 } from "../core/dom.js";
 import { fmtTime } from "../core/format.js";
 import { clearNotice, notifyError } from "../core/notice.js";
+import { openKeyUsage } from "./usage.js";
 
 /** One quota token-unit = 1,000,000 tokens. */
 const TOKEN_UNIT = 1_000_000;
@@ -106,6 +107,7 @@ export async function loadKeys() {
         limitsSummary(k),
         k.last_used_at ? fmtTime(k.last_used_at) : "never",
         wrapButtons(
+          detailsButton(k),
           smallButton("Edit", () => openKeyDialog("edit", k)),
           delButton(() =>
             askConfirm({
@@ -123,6 +125,16 @@ export async function loadKeys() {
   } catch (e) {
     fillTableMessage("keysTable", `Failed to load: ${e.message}`, { error: true });
   }
+}
+
+/** Read-only users can open the usage detail too, so this button is not admin-only. */
+function detailsButton(key) {
+  const button = document.createElement("button");
+  button.type = "button";
+  button.textContent = "Details";
+  button.className = "secondary small";
+  button.onclick = () => openKeyUsage(key.id);
+  return button;
 }
 
 function openKeyDialog(mode, key) {
