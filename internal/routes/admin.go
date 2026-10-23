@@ -2,6 +2,7 @@ package routes
 
 import (
 	"encoding/json"
+	"errors"
 	"io"
 	"math"
 	"net/http"
@@ -36,6 +37,7 @@ func NewAdminResources(secrets *util.SecretBox, logRetentionDays int) *AdminReso
 func (h *AdminResources) Register(mux *http.ServeMux) {
 	mux.HandleFunc("/admin/stats", h.stats)
 	mux.HandleFunc("/admin/usage", h.usage)
+	mux.HandleFunc("/admin/usage/{id}", h.usageByID)
 	mux.HandleFunc("/admin/logs", h.logs)
 	mux.HandleFunc("/admin/logs/cleanup", h.logsCleanup)
 	mux.HandleFunc("/admin/providers", h.providers)
@@ -112,16 +114,17 @@ func isUniqueViolation(err error) bool {
 // ----------------------------------------------------------------- providers
 
 type providerDTO struct {
-	ID           int64   `json:"id"`
-	Name         string  `json:"name"`
-	Type         string  `json:"type"`
-	BaseURL      string  `json:"base_url"`
-	Enabled      int     `json:"enabled"`
-	CreatedAt    int64   `json:"created_at"`
-	UpdatedAt    int64   `json:"updated_at"`
-	HasAPIKey    bool    `json:"has_api_key"`
-	APIKeyMasked *string `json:"api_key_masked"`
-	APIKeyError  bool    `json:"api_key_error,omitempty"`
+	ID           int64             `json:"id"`
+	Name         string            `json:"name"`
+	Type         string            `json:"type"`
+	BaseURL      string            `json:"base_url"`
+	Headers      map[string]string `json:"headers"`
+	Enabled      int               `json:"enabled"`
+	CreatedAt    int64             `json:"created_at"`
+	UpdatedAt    int64             `json:"updated_at"`
+	HasAPIKey    bool              `json:"has_api_key"`
+	APIKeyMasked *string           `json:"api_key_masked"`
+	APIKeyError  bool              `json:"api_key_error,omitempty"`
 }
 
 func (h *AdminResources) providerDTO(provider db.ProviderRow) providerDTO {
@@ -130,6 +133,7 @@ func (h *AdminResources) providerDTO(provider db.ProviderRow) providerDTO {
 		Name:      provider.Name,
 		Type:      provider.Type,
 		BaseURL:   provider.BaseURL,
+		Headers:   providerHeaders(provider.Headers),
 		Enabled:   boolInt(provider.Enabled),
 		CreatedAt: provider.CreatedAt,
 		UpdatedAt: provider.UpdatedAt,
@@ -175,11 +179,12 @@ func (h *AdminResources) providers(w http.ResponseWriter, r *http.Request) {
 
 func (h *AdminResources) createProvider(w http.ResponseWriter, r *http.Request) {
 	var body struct {
-		Name    string  `json:"name"`
-		Type    string  `json:"type"`
-		BaseURL string  `json:"baseUrl"`
-		APIKey  *string `json:"apiKey"`
-		Enabled *bool   `json:"enabled"`
+		Name    string            `json:"name"`
+		Type    string            `json:"type"`
+		BaseURL string            `json:"baseUrl"`
+		APIKey  *string           `json:"apiKey"`
+		Headers map[string]string `json:"headers"`
+		Enabled *bool             `json:"enabled"`
 	}
 	if _, ok := decodeBody(w, r, &body); !ok {
 		return
@@ -196,6 +201,11 @@ func (h *AdminResources) createProvider(w http.ResponseWriter, r *http.Request) 
 		invalidRequest(w, err.Error())
 		return
 	}
+	headers, err := encodeProviderHeaders(body.Headers)
+	if err != nil {
+		invalidRequest(w, err.Error())
+		return
+	}
 	enabled := true
 	if body.Enabled != nil {
 		enabled = *body.Enabled
@@ -205,7 +215,7 @@ func (h *AdminResources) createProvider(w http.ResponseWriter, r *http.Request) 
 		internalError(w, "encrypt provider key", err)
 		return
 	}
-	provider, err := db.CreateProvider(body.Name, body.Type, body.BaseURL, encrypted, enabled)
+	provider, err := db.CreateProvider(body.Name, body.Type, body.BaseURL, encrypted, headers, enabled)
 	if err != nil {
 		if isUniqueViolation(err) {
 			conflict(w, err.Error(), "constraint_violation")
@@ -246,10 +256,11 @@ func (h *AdminResources) providerByID(w http.ResponseWriter, r *http.Request) {
 
 func (h *AdminResources) updateProvider(w http.ResponseWriter, r *http.Request, id int64) {
 	var body struct {
-		Name    *string `json:"name"`
-		Type    *string `json:"type"`
-		BaseURL *string `json:"baseUrl"`
-		Enabled *bool   `json:"enabled"`
+		Name    *string           `json:"name"`
+		Type    *string           `json:"type"`
+		BaseURL *string           `json:"baseUrl"`
+		Headers map[string]string `json:"headers"`
+		Enabled *bool             `json:"enabled"`
 	}
 	fields, ok := decodeBody(w, r, &body)
 	if !ok {
@@ -274,6 +285,15 @@ func (h *AdminResources) updateProvider(w http.ResponseWriter, r *http.Request, 
 		Type:    body.Type,
 		BaseURL: body.BaseURL,
 		Enabled: body.Enabled,
+	}
+	if fieldPresent(fields, "headers") {
+		headers, err := encodeProviderHeaders(body.Headers)
+		if err != nil {
+			invalidRequest(w, err.Error())
+			return
+		}
+		patch.HeadersSet = true
+		patch.Headers = headers
 	}
 	if set, value := nullableString(fields, "apiKey"); set {
 		patch.APIKeySet = true
@@ -353,6 +373,51 @@ func (h *AdminResources) deleteProvider(w http.ResponseWriter, r *http.Request, 
 
 func validProviderType(kind string) bool {
 	return kind == "openai" || kind == "anthropic" || kind == "compatible"
+}
+
+// providerHeaders decodes the stored custom-header JSON object.
+func providerHeaders(raw *string) map[string]string {
+	headers := map[string]string{}
+	if raw == nil || *raw == "" {
+		return headers
+	}
+	_ = json.Unmarshal([]byte(*raw), &headers)
+	return headers
+}
+
+// encodeProviderHeaders validates and serializes a custom-header map. No
+// headers is stored as nil so the column stays empty.
+func encodeProviderHeaders(headers map[string]string) (*string, error) {
+	if len(headers) == 0 {
+		return nil, nil
+	}
+	for name, value := range headers {
+		if !validHeaderName(name) {
+			return nil, errors.New("invalid header name: " + name)
+		}
+		if strings.ContainsAny(value, "\r\n") {
+			return nil, errors.New("header values must not contain newlines")
+		}
+	}
+	encoded, err := json.Marshal(headers)
+	if err != nil {
+		return nil, err
+	}
+	serialized := string(encoded)
+	return &serialized, nil
+}
+
+func validHeaderName(name string) bool {
+	if name == "" || strings.TrimSpace(name) != name {
+		return false
+	}
+	for index := 0; index < len(name); index++ {
+		character := name[index]
+		if character <= 0x20 || character >= 0x7f || strings.ContainsRune("()<>@,;:\\\"/[]?={}", rune(character)) {
+			return false
+		}
+	}
+	return true
 }
 
 // encryptOptional encrypts a non-empty secret; nil/empty stays nil.
@@ -1281,6 +1346,50 @@ func (h *AdminResources) usage(w http.ResponseWriter, r *http.Request) {
 		data = append(data, toUsageLogDTO(entry))
 	}
 	httperr.WriteJSON(w, http.StatusOK, map[string]any{"data": data})
+}
+
+// usageDetailDTO is a single usage row plus its header snapshots.
+type usageDetailDTO struct {
+	usageLogDTO
+	RequestHeaders  map[string]string `json:"request_headers"`
+	UpstreamHeaders map[string]string `json:"upstream_headers"`
+}
+
+// usageByID serves GET /admin/usage/{id} for the detail dialog.
+func (h *AdminResources) usageByID(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		methodNotAllowed(w, "GET")
+		return
+	}
+	id, ok := pathID(r)
+	if !ok {
+		invalidRequest(w, "Invalid id")
+		return
+	}
+	entry, err := db.GetUsageLog(id)
+	if err != nil {
+		internalError(w, "get usage log", err)
+		return
+	}
+	if entry == nil {
+		httperr.NotFound(w)
+		return
+	}
+	httperr.WriteJSON(w, http.StatusOK, usageDetailDTO{
+		usageLogDTO:     toUsageLogDTO(*entry),
+		RequestHeaders:  decodeHeaderSnapshot(entry.RequestHeaders),
+		UpstreamHeaders: decodeHeaderSnapshot(entry.UpstreamHeaders),
+	})
+}
+
+// decodeHeaderSnapshot turns a stored JSON snapshot into a map for the UI.
+func decodeHeaderSnapshot(raw *string) map[string]string {
+	headers := map[string]string{}
+	if raw == nil || *raw == "" {
+		return headers
+	}
+	_ = json.Unmarshal([]byte(*raw), &headers)
+	return headers
 }
 
 // ------------------------------------------------------------------- logs

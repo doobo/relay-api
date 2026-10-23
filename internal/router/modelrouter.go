@@ -2,6 +2,7 @@
 package router
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
 
@@ -92,6 +93,7 @@ func (r *Resolver) ProviderConfig(route Route, requestTimeoutMs int) (providers.
 		Name:             route.Provider.Name,
 		Type:             route.Provider.Type,
 		BaseURL:          route.Provider.BaseURL,
+		Headers:          parseProviderHeaders(route.Provider.Headers),
 		RequestTimeoutMs: requestTimeoutMs,
 	}
 	if route.Provider.APIKey != nil && *route.Provider.APIKey != "" {
@@ -105,4 +107,16 @@ func (r *Resolver) ProviderConfig(route Route, requestTimeoutMs int) (providers.
 		cfg.APIKey = &plaintext
 	}
 	return cfg, nil
+}
+
+// parseProviderHeaders decodes the stored custom-header JSON object.
+func parseProviderHeaders(raw *string) map[string]string {
+	if raw == nil || *raw == "" {
+		return nil
+	}
+	var headers map[string]string
+	if err := json.Unmarshal([]byte(*raw), &headers); err != nil {
+		return nil
+	}
+	return headers
 }

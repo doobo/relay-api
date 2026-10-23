@@ -82,7 +82,7 @@ func main() {
 	v1Mux := http.NewServeMux()
 	routes.NewGateway(cfg, resolver).Register(v1Mux)
 	v1Mux.HandleFunc("/", func(w http.ResponseWriter, _ *http.Request) { httperr.NotFound(w) })
-	v1Handler := middleware.BodyParser(cfg.RequestSizeLimitBytes)(middleware.APIKeyAuth(limiter)(v1Mux))
+	v1Handler := middleware.BodyParser(cfg.RequestSizeLimitBytes)(middleware.APIKeyAuth(limiter)(middleware.AISession(v1Mux)))
 
 	// Non-AI JSON forwarder: /open/* keeps the same size limit and API-key auth.
 	openMux := http.NewServeMux()

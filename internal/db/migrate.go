@@ -15,6 +15,9 @@ CREATE TABLE IF NOT EXISTS providers (
   type TEXT NOT NULL,
   base_url TEXT NOT NULL,
   api_key TEXT,
+  /* Extra upstream headers as a JSON object; values may reference client
+     headers with ${name} and the resolved identity with ${_ai_session}. */
+  headers TEXT,
   enabled INTEGER DEFAULT 1,
   created_at INTEGER NOT NULL,
   updated_at INTEGER NOT NULL
@@ -100,6 +103,9 @@ CREATE TABLE IF NOT EXISTS usage_logs (
   status INTEGER,
   stream INTEGER DEFAULT 0,
   error TEXT,
+  /* JSON snapshots for the usage-log detail view; secrets are redacted. */
+  request_headers TEXT,
+  upstream_headers TEXT,
   created_at INTEGER NOT NULL
 );
 
@@ -158,8 +164,19 @@ func Migrate(db *sql.DB) error {
 			}
 		}
 
+		// Added with provider custom headers.
+		if err := ensureColumn(tx, "providers", "headers", "TEXT"); err != nil {
+			return err
+		}
 		// Added with the forwarding usage column.
 		if err := ensureColumn(tx, "usage_logs", "target_url", "TEXT"); err != nil {
+			return err
+		}
+		// Added with request-header snapshots in the usage details view.
+		if err := ensureColumn(tx, "usage_logs", "request_headers", "TEXT"); err != nil {
+			return err
+		}
+		if err := ensureColumn(tx, "usage_logs", "upstream_headers", "TEXT"); err != nil {
 			return err
 		}
 		// Added with the /free mount: pre-existing configs were all /open.

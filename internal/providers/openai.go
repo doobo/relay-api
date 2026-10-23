@@ -21,12 +21,12 @@ func (p *OpenAI) endpoint(path string) string {
 	return strings.TrimRight(p.cfg.BaseURL, "/") + path
 }
 
-func (p *OpenAI) headers() map[string]string {
+func (p *OpenAI) headers(request Request) map[string]string {
 	headers := map[string]string{"content-type": "application/json"}
 	if p.cfg.APIKey != nil && *p.cfg.APIKey != "" {
 		headers["authorization"] = "Bearer " + *p.cfg.APIKey
 	}
-	return headers
+	return applyCustomHeaders(headers, p.cfg, request)
 }
 
 // buildBody copies the raw client body and pins model/stream.
@@ -48,7 +48,7 @@ func (p *OpenAI) Chat(ctx context.Context, request Request) (*Result, error) {
 	}
 	response, err := util.FetchUpstream(ctx, p.endpoint("/chat/completions"), util.FetchOptions{
 		Method:    http.MethodPost,
-		Headers:   p.headers(),
+		Headers:   p.headers(request),
 		Body:      bytes.NewReader(payload),
 		TimeoutMs: p.cfg.RequestTimeoutMs,
 	})
@@ -109,7 +109,7 @@ func (p *OpenAI) ChatStream(ctx context.Context, request Request) (*http.Respons
 	}
 	response, err := util.FetchUpstream(ctx, p.endpoint("/chat/completions"), util.FetchOptions{
 		Method:  http.MethodPost,
-		Headers: p.headers(),
+		Headers: p.headers(request),
 		Body:    bytes.NewReader(payload),
 		// No overall timeout for streams; the caller enforces an idle timeout.
 		TimeoutMs: 0,

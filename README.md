@@ -8,10 +8,11 @@ OpenAI 兼容的 API 中转网关，后端使用 Go 实现，前端管理界面�
 
 - OpenAI 兼容接口：`/v1/models`、`/v1/chat/completions`，支持 SSE 流式响应
 - 多上游管理：provider / model / model-route（优先级 + 故障转移）配置
+- Provider 自定义请求头：`${客户端header}` 引入客户端值，`${_ai_session}` 引入解析出的用户会话标识
 - API Key 鉴权与限流，密钥仅存加密值（AES-GCM）
 - 非 AI 场景转发：`/open/*`（需 API Key 的 JSON 转发）、`/free/*`（公开的原始流式隧道）
 - 内嵌管理后台：用户、模型、密钥、配置、用量统计、审计日志、登录限流
-- 审计与用量落库，按 `LOG_RETENTION_DAYS` 每日定时清理
+- 审计与用量落库，按 `LOG_RETENTION_DAYS` 每日定时清理；用量日志可点开详情查看客户端与上游请求头（敏感头打码）
 - 单端口 HTTP/1.1 + h2c，`SIGINT`/`SIGTERM` 优雅退出
 
 ## 快速开始
@@ -61,6 +62,25 @@ CGO_ENABLED=0 go build -trimpath -ldflags "-s -w" -o relay-api .
 ```bash
 PORT=8080 LOG_LEVEL=debug DATABASE_PATH=/var/lib/relay-api/gateway.db \
 SECRET_KEY_FILE=/var/lib/relay-api/.secret-key ./relay-api
+```
+
+## Provider 自定义 Header 与会话标识
+
+在后台 Provider 的 `headers` 中填写 JSON 对象即可向上游追加请求头，值支持两种占位符：
+
+- `${name}` / `${headers.name}`：取客户端同名请求头（大小写不敏感），例如 `${uuid}`。
+- `${_ai_session}`：取本次请求解析出的用户标识。
+
+用户标识按以下顺序解析：`x-opencode-session`、`x-ai-session`、`ai-session`、`x-session-id`、`session-id`、`x-user-id`、`user-id`、`x-client-id`、`client-id`、`x-uuid`、`uuid`、`x-user`、`user` 请求头；其次是请求体中的 `user` 或 `metadata.user_id`；都没有时使用客户端 IP 与 User-Agent 的哈希（32 位十六进制）。
+
+示例：
+
+```json
+{
+  "x-user-id": "${x-user-id}",
+  "x-client-uuid": "${uuid}",
+  "x-ai-session": "${_ai_session}"
+}
 ```
 
 ## 路由概览

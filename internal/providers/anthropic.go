@@ -23,7 +23,7 @@ func (p *Anthropic) endpoint(path string) string {
 	return strings.TrimRight(p.cfg.BaseURL, "/") + path
 }
 
-func (p *Anthropic) headers() map[string]string {
+func (p *Anthropic) headers(request Request) map[string]string {
 	headers := map[string]string{
 		"content-type":      "application/json",
 		"anthropic-version": "2023-06-01",
@@ -31,7 +31,7 @@ func (p *Anthropic) headers() map[string]string {
 	if p.cfg.APIKey != nil && *p.cfg.APIKey != "" {
 		headers["x-api-key"] = *p.cfg.APIKey
 	}
-	return headers
+	return applyCustomHeaders(headers, p.cfg, request)
 }
 
 type anthropicMessage struct {
@@ -157,7 +157,7 @@ func (p *Anthropic) Chat(ctx context.Context, request Request) (*Result, error) 
 	}
 	response, err := util.FetchUpstream(ctx, p.endpoint("/messages"), util.FetchOptions{
 		Method:    http.MethodPost,
-		Headers:   p.headers(),
+		Headers:   p.headers(request),
 		Body:      bytes.NewReader(payload),
 		TimeoutMs: p.cfg.RequestTimeoutMs,
 	})
@@ -216,7 +216,7 @@ func (p *Anthropic) ChatStream(ctx context.Context, request Request) (*http.Resp
 	}
 	upstream, err := util.FetchUpstream(ctx, p.endpoint("/messages"), util.FetchOptions{
 		Method:    http.MethodPost,
-		Headers:   p.headers(),
+		Headers:   p.headers(request),
 		Body:      bytes.NewReader(payload),
 		TimeoutMs: 0,
 	})

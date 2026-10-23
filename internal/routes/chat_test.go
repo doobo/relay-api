@@ -52,11 +52,22 @@ func TestGateway(t *testing.T) {
 	defer reject.Close()
 	good := httptest.NewServer(http.HandlerFunc(healthyUpstream))
 	defer good.Close()
+	var seenHeaders http.Header
+	headerUpstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		seenHeaders = r.Header.Clone()
+		healthyUpstream(w, r)
+	}))
+	defer headerUpstream.Close()
 
 	badProvider := mustProvider(t, "bad", "openai", bad.URL)
 	goodProvider := mustProvider(t, "good", "openai", good.URL)
 	anthropicProvider := mustProvider(t, "claude", "anthropic", good.URL)
 	rejectProvider := mustProvider(t, "reject", "openai", reject.URL)
+	headersJSON := `{"x-user-id":"${x-user-id}","x-session":"${_ai_session}","x-static":"fixed"}`
+	headerProviderRow, err := db.CreateProvider("headers", "openai", headerUpstream.URL, nil, &headersJSON, true)
+	if err != nil {
+		t.Fatalf("create header provider: %v", err)
+	}
 
 	// Alias "m" has two routes: bad first (500 -> failover), good second.
 	if _, err := db.CreateModel("m", badProvider, "upstream-model", true, 100); err != nil {
@@ -68,6 +79,9 @@ func TestGateway(t *testing.T) {
 		t.Fatalf("create model: %v", err)
 	}
 	if _, err := db.CreateModel("e400", rejectProvider, "upstream-model", true, 100); err != nil {
+		t.Fatalf("create model: %v", err)
+	}
+	if _, err := db.CreateModel("hdrs", headerProviderRow.ID, "upstream-model", true, 100); err != nil {
 		t.Fatalf("create model: %v", err)
 	}
 
@@ -84,7 +98,7 @@ func TestGateway(t *testing.T) {
 	mux := http.NewServeMux()
 	gw.Register(mux)
 	mux.HandleFunc("/", func(w http.ResponseWriter, _ *http.Request) { httperr.NotFound(w) })
-	handler := middleware.RequestLog(middleware.BodyParser(cfg.RequestSizeLimitBytes)(middleware.APIKeyAuth(middleware.NewRateLimiter())(mux)))
+	handler := middleware.RequestLog(middleware.BodyParser(cfg.RequestSizeLimitBytes)(middleware.APIKeyAuth(middleware.NewRateLimiter())(middleware.AISession(mux))))
 
 	do := func(t *testing.T, body string) *httptest.ResponseRecorder {
 		t.Helper()
@@ -186,6 +200,56 @@ func TestGateway(t *testing.T) {
 		}
 	})
 
+	t.Run("custom provider headers use client values and session", func(t *testing.T) {
+		request := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(`{"model":"hdrs","messages":[{"role":"user","content":"hi"}]}`))
+		request.Header.Set("Authorization", "Bearer "+fullKey)
+		request.Header.Set("content-type", "application/json")
+		request.Header.Set("X-User-Id", "alice")
+		recorder := httptest.NewRecorder()
+		handler.ServeHTTP(recorder, request)
+		if recorder.Code != http.StatusOK {
+			t.Fatalf("status = %d, body = %s", recorder.Code, recorder.Body.String())
+		}
+		if seenHeaders.Get("x-user-id") != "alice" || seenHeaders.Get("x-session") != "alice" || seenHeaders.Get("x-static") != "fixed" {
+			t.Fatalf("custom headers not forwarded: %v", seenHeaders)
+		}
+	})
+
+	t.Run("usage stores header snapshots", func(t *testing.T) {
+		request := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(`{"model":"hdrs","messages":[{"role":"user","content":"hi"}]}`))
+		request.Header.Set("Authorization", "Bearer "+fullKey)
+		request.Header.Set("content-type", "application/json")
+		request.Header.Set("X-Opencode-Session", "oc-1")
+		recorder := httptest.NewRecorder()
+		handler.ServeHTTP(recorder, request)
+		if recorder.Code != http.StatusOK {
+			t.Fatalf("status = %d, body = %s", recorder.Code, recorder.Body.String())
+		}
+		if err := db.FlushUsage(context.Background()); err != nil {
+			t.Fatalf("flush usage: %v", err)
+		}
+		var requestRaw, upstreamRaw string
+		if err := db.Get().QueryRow(
+			`SELECT request_headers, upstream_headers FROM usage_logs
+			 WHERE model = 'hdrs' AND provider = 'headers' ORDER BY id DESC LIMIT 1`,
+		).Scan(&requestRaw, &upstreamRaw); err != nil {
+			t.Fatalf("query headers: %v", err)
+		}
+		var requestHeaders, upstreamHeaders map[string]string
+		if err := json.Unmarshal([]byte(requestRaw), &requestHeaders); err != nil {
+			t.Fatalf("decode request headers: %v", err)
+		}
+		if err := json.Unmarshal([]byte(upstreamRaw), &upstreamHeaders); err != nil {
+			t.Fatalf("decode upstream headers: %v", err)
+		}
+		if requestHeaders["x-opencode-session"] != "oc-1" || requestHeaders["authorization"] != "[redacted]" {
+			t.Fatalf("unexpected request snapshot: %+v", requestHeaders)
+		}
+		if upstreamHeaders["x-session"] != "oc-1" || upstreamHeaders["x-static"] != "fixed" {
+			t.Fatalf("unexpected upstream snapshot: %+v", upstreamHeaders)
+		}
+	})
+
 	t.Run("unknown model", func(t *testing.T) {
 		recorder := do(t, `{"model":"nope","messages":[{"role":"user","content":"hi"}]}`)
 		if recorder.Code != http.StatusNotFound || !strings.Contains(recorder.Body.String(), "model_not_found") {
@@ -220,7 +284,7 @@ func TestGateway(t *testing.T) {
 
 func mustProvider(t *testing.T, name, kind, baseURL string) int64 {
 	t.Helper()
-	provider, err := db.CreateProvider(name, kind, baseURL, nil, true)
+	provider, err := db.CreateProvider(name, kind, baseURL, nil, nil, true)
 	if err != nil {
 		t.Fatalf("create provider %s: %v", name, err)
 	}

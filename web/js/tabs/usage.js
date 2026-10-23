@@ -6,8 +6,9 @@
  */
 
 import { api } from "../core/api.js";
-import { el, fillTable, fillTableMessage, monoCell, statusPill } from "../core/dom.js";
+import { closeDialog, el, fillTable, fillTableMessage, monoCell, openDialog, statusPill } from "../core/dom.js";
 import { fmtTime } from "../core/format.js";
+import { notifyError } from "../core/notice.js";
 
 const PAGE_SIZE = 50;
 
@@ -48,10 +49,50 @@ function render() {
       u.total_tokens,
       statusPill(u.status),
       `${u.latency_ms ?? "-"}ms`,
+      detailButton(u.id),
     ]),
   );
   el("usageCount").textContent = rows.length === 0 ? "No matching requests." : `${rows.length} rows`;
   el("usageLoadMore").classList.toggle("hidden", !hasMore);
+}
+
+function detailButton(id) {
+  const button = document.createElement("button");
+  button.type = "button";
+  button.textContent = "Details";
+  button.className = "secondary small";
+  button.onclick = () => showUsageDetail(id);
+  return button;
+}
+
+async function showUsageDetail(id) {
+  try {
+    const usage = await api(`/admin/usage/${id}`);
+    const model = usage.model || (usage.api_config_id ? `config #${usage.api_config_id}` : "-");
+    el("usageDetailMeta").textContent = [
+      `Request: ${usage.request_id}`,
+      `Time: ${fmtTime(usage.created_at)}`,
+      `Kind: ${usage.kind}`,
+      `Model/Config: ${model}`,
+      `Provider: ${usage.provider || usage.target_url || "-"}`,
+      `Status: ${usage.status ?? "-"}`,
+      `Latency: ${usage.latency_ms ?? "-"}ms`,
+      `Tokens: ${usage.total_tokens} (in ${usage.input_tokens} / out ${usage.output_tokens})`,
+      `Stream: ${usage.stream ? "yes" : "no"}`,
+      `Error: ${usage.error || "-"}`,
+    ].join("\n");
+    el("usageDetailRequestHeaders").textContent = formatHeaders(usage.request_headers);
+    el("usageDetailUpstreamHeaders").textContent = formatHeaders(usage.upstream_headers);
+    openDialog("usageDetailDialog");
+  } catch (e) {
+    notifyError(e.message);
+  }
+}
+
+function formatHeaders(headers) {
+  const entries = Object.entries(headers || {});
+  if (entries.length === 0) return "(none recorded)";
+  return JSON.stringify(Object.fromEntries(entries.sort(([a], [b]) => a.localeCompare(b))), null, 2);
 }
 
 async function fetchPage({ append }) {
@@ -86,4 +127,5 @@ export function initUsage() {
     loadUsage();
   };
   el("usageLoadMore").onclick = () => fetchPage({ append: true });
+  el("usageDetailClose").onclick = () => closeDialog("usageDetailDialog");
 }

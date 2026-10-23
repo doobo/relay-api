@@ -26,25 +26,28 @@ func boolToInt(value bool) int {
 
 // ProviderRow is one upstream provider.
 type ProviderRow struct {
-	ID        int64
-	Name      string
-	Type      string
-	BaseURL   string
-	APIKey    *string
+	ID      int64
+	Name    string
+	Type    string
+	BaseURL string
+	APIKey  *string
+	// Headers is a JSON object of extra upstream headers.
+	Headers   *string
 	Enabled   bool
 	CreatedAt int64
 	UpdatedAt int64
 }
 
-const providerColumns = `id, name, type, base_url, api_key, enabled, created_at, updated_at`
+const providerColumns = `id, name, type, base_url, api_key, headers, enabled, created_at, updated_at`
 
 func scanProvider(row interface{ Scan(...any) error }) (*ProviderRow, error) {
 	var (
 		provider ProviderRow
 		apiKey   sql.NullString
+		headers  sql.NullString
 		enabled  int
 	)
-	if err := row.Scan(&provider.ID, &provider.Name, &provider.Type, &provider.BaseURL, &apiKey, &enabled, &provider.CreatedAt, &provider.UpdatedAt); err != nil {
+	if err := row.Scan(&provider.ID, &provider.Name, &provider.Type, &provider.BaseURL, &apiKey, &headers, &enabled, &provider.CreatedAt, &provider.UpdatedAt); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return nil, nil
 		}
@@ -52,6 +55,9 @@ func scanProvider(row interface{ Scan(...any) error }) (*ProviderRow, error) {
 	}
 	if apiKey.Valid {
 		provider.APIKey = &apiKey.String
+	}
+	if headers.Valid {
+		provider.Headers = &headers.String
 	}
 	provider.Enabled = enabled != 0
 	return &provider, nil
@@ -80,13 +86,14 @@ func GetProvider(id int64) (*ProviderRow, error) {
 	return scanProvider(Get().QueryRow(`SELECT `+providerColumns+` FROM providers WHERE id = ?`, id))
 }
 
-// CreateProvider inserts a provider.
-func CreateProvider(name, kind, baseURL string, apiKey *string, enabled bool) (*ProviderRow, error) {
+// CreateProvider inserts a provider. Headers is a JSON object of extra upstream
+// headers (nil/empty for none).
+func CreateProvider(name, kind, baseURL string, apiKey, headers *string, enabled bool) (*ProviderRow, error) {
 	now := time.Now().UnixMilli()
 	result, err := Get().Exec(
-		`INSERT INTO providers (name, type, base_url, api_key, enabled, created_at, updated_at)
-		 VALUES (?, ?, ?, ?, ?, ?, ?)`,
-		name, kind, baseURL, nullString(apiKey), boolToInt(enabled), now, now,
+		`INSERT INTO providers (name, type, base_url, api_key, headers, enabled, created_at, updated_at)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+		name, kind, baseURL, nullString(apiKey), nullString(headers), boolToInt(enabled), now, now,
 	)
 	if err != nil {
 		return nil, err
@@ -107,6 +114,9 @@ type ProviderPatch struct {
 	Enabled   *bool
 	APIKeySet bool
 	APIKey    *string
+	// HeadersSet replaces the current headers (with possibly nil) when true.
+	HeadersSet bool
+	Headers    *string
 }
 
 // UpdateProvider applies a patch and returns the updated row.
@@ -133,9 +143,13 @@ func UpdateProvider(id int64, patch ProviderPatch) (*ProviderRow, error) {
 	if patch.APIKeySet {
 		apiKey = patch.APIKey
 	}
+	headers := existing.Headers
+	if patch.HeadersSet {
+		headers = patch.Headers
+	}
 	_, err = Get().Exec(
-		`UPDATE providers SET name = ?, type = ?, base_url = ?, api_key = ?, enabled = ?, updated_at = ? WHERE id = ?`,
-		name, kind, baseURL, nullString(apiKey), boolToInt(enabled), time.Now().UnixMilli(), id,
+		`UPDATE providers SET name = ?, type = ?, base_url = ?, api_key = ?, headers = ?, enabled = ?, updated_at = ? WHERE id = ?`,
+		name, kind, baseURL, nullString(apiKey), nullString(headers), boolToInt(enabled), time.Now().UnixMilli(), id,
 	)
 	if err != nil {
 		return nil, err

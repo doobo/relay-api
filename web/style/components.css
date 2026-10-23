@@ -506,6 +506,34 @@ dialog .dialog-actions {
   flex-wrap: wrap;
 }
 
+dialog h4 {
+  margin: 6px 0 0;
+  font-size: 13px;
+  color: var(--muted);
+}
+
+.detail-meta {
+  margin: 0;
+  white-space: pre-wrap;
+  font-size: 13px;
+  line-height: 1.6;
+}
+
+.code-block {
+  margin: 0;
+  padding: 10px;
+  min-height: 42px;
+  max-height: 260px;
+  overflow: auto;
+  background: var(--input-bg);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  font-size: 12px;
+  line-height: 1.5;
+  white-space: pre-wrap;
+  word-break: break-all;
+}
+
 /* ------------------------------------------------------------ banners */
 
 .banner {

@@ -37,6 +37,7 @@ export async function loadProviders() {
         p.name,
         p.type,
         p.base_url,
+        String(Object.keys(p.headers || {}).length),
         p.api_key_masked || "(none)",
         badge(p.enabled ? "ON" : "OFF", p.enabled ? "on" : "off"),
         wrapButtons(
@@ -74,8 +75,33 @@ function openProviderEdit(p) {
   form.elements.apiKey.placeholder = p.has_api_key
     ? "new API key (leave blank to keep current)"
     : "API key (optional)";
+  form.elements.headers.value = Object.keys(p.headers || {}).length
+    ? JSON.stringify(p.headers)
+    : "";
   form.elements.enabled.checked = Boolean(p.enabled);
   openDialog("providerEditDialog");
+}
+
+// parseHeaderInput accepts the JSON object shown in the form; a blank value
+// means no custom headers.
+function parseHeaderInput(raw) {
+  const text = String(raw || "").trim();
+  if (!text) return {};
+  let parsed;
+  try {
+    parsed = JSON.parse(text);
+  } catch {
+    throw new Error("Headers must be a valid JSON object");
+  }
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+    throw new Error("Headers must be a JSON object");
+  }
+  for (const [name, value] of Object.entries(parsed)) {
+    if (typeof value !== "string") {
+      throw new Error(`Header '${name}' must have a string value`);
+    }
+  }
+  return parsed;
 }
 
 export function initProviders() {
@@ -86,15 +112,16 @@ export function initProviders() {
     const form = event.target;
     clearNotice(form);
     const id = form.dataset.id;
-    const body = {
-      name: form.elements.name.value,
-      type: form.elements.type.value,
-      baseUrl: form.elements.baseUrl.value,
-      enabled: form.elements.enabled.checked,
-    };
-    const newKey = form.elements.apiKey.value.trim();
-    if (newKey) body.apiKey = newKey; // only send when rotating
     try {
+      const body = {
+        name: form.elements.name.value,
+        type: form.elements.type.value,
+        baseUrl: form.elements.baseUrl.value,
+        headers: parseHeaderInput(form.elements.headers.value),
+        enabled: form.elements.enabled.checked,
+      };
+      const newKey = form.elements.apiKey.value.trim();
+      if (newKey) body.apiKey = newKey; // only send when rotating
       await api(`/admin/providers/${id}`, { method: "PUT", body: JSON.stringify(body) });
       closeDialog("providerEditDialog");
       invalidateProviders();
@@ -117,6 +144,7 @@ export function initProviders() {
           name: form.get("name"),
           type: form.get("type"),
           baseUrl: form.get("baseUrl"),
+          headers: parseHeaderInput(form.get("headers")),
           apiKey: form.get("apiKey") || null,
         }),
       });

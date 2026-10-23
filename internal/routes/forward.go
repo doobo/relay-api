@@ -66,6 +66,7 @@ func (h *ForwardRoutes) handle(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var targetURL *string
+	var upstreamHeaders map[string]string
 	record := func(status int, errMsg *string) {
 		var keyPtr *int64
 		if auth != nil {
@@ -75,14 +76,16 @@ func (h *ForwardRoutes) handle(w http.ResponseWriter, r *http.Request) {
 		configID := apiConfig.ID
 		latency := time.Since(startedAt).Milliseconds()
 		db.RecordUsageAsync(db.UsageRecord{
-			RequestID:   requestID,
-			APIKeyID:    keyPtr,
-			Kind:        "api",
-			APIConfigID: &configID,
-			TargetURL:   targetURL,
-			LatencyMs:   &latency,
-			Status:      &status,
-			Error:       errMsg,
+			RequestID:       requestID,
+			APIKeyID:        keyPtr,
+			Kind:            "api",
+			APIConfigID:     &configID,
+			TargetURL:       targetURL,
+			LatencyMs:       &latency,
+			Status:          &status,
+			Error:           errMsg,
+			RequestHeaders:  snapshotHTTPHeaders(r.Header),
+			UpstreamHeaders: snapshotHeaderMap(upstreamHeaders),
 		})
 	}
 
@@ -126,7 +129,7 @@ func (h *ForwardRoutes) handle(w http.ResponseWriter, r *http.Request) {
 	for key, value := range parseStringMap(apiConfig.Headers) {
 		renderedConfigHeaders[key] = asString(util.RenderTemplate(value, templateContext))
 	}
-	upstreamHeaders := util.FilterRequestHeaders(clientHeaders)
+	upstreamHeaders = util.FilterRequestHeaders(clientHeaders)
 	for key, value := range renderedConfigHeaders {
 		upstreamHeaders[key] = value
 	}

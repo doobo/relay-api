@@ -11,11 +11,15 @@ import (
 
 // Config is everything needed to reach one upstream.
 type Config struct {
-	ID               int64
-	Name             string
-	Type             string
-	BaseURL          string
-	APIKey           *string
+	ID      int64
+	Name    string
+	Type    string
+	BaseURL string
+	APIKey  *string
+	// Headers are extra upstream headers. Values may contain ${name}
+	// placeholders resolved from the client request headers, or ${_ai_session}
+	// for the resolved client identity.
+	Headers          map[string]string
 	RequestTimeoutMs int
 }
 
@@ -28,6 +32,14 @@ type Request struct {
 	// RawBody is the original client body, forwarded as-is so parameters the
 	// gateway does not model (tools, response_format, top_p, ...) survive.
 	RawBody map[string]any
+	// ClientHeaders are the lowercased client request headers, available to
+	// custom provider headers through ${name}.
+	ClientHeaders map[string]string
+	// Session is the resolved client identity (the _ai_session context value).
+	Session string
+	// OnUpstreamHeaders, when set, receives the final headers about to be sent
+	// upstream. The gateway uses it to record a snapshot for usage details.
+	OnUpstreamHeaders func(map[string]string)
 }
 
 // Usage is token accounting.

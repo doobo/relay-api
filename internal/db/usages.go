@@ -24,14 +24,18 @@ type UsageRecord struct {
 	Status       *int
 	Stream       bool
 	Error        *string
+	// RequestHeaders/UpstreamHeaders are JSON snapshots for the detail view.
+	RequestHeaders  *string
+	UpstreamHeaders *string
 }
 
 // usageInsertSQL appends one usage_logs row. The synchronous and asynchronous
 // paths share it so both write an identical shape.
 const usageInsertSQL = `INSERT INTO usage_logs
 	(request_id, api_key_id, kind, model, provider, api_config_id, target_url,
-	 input_tokens, output_tokens, total_tokens, latency_ms, status, stream, error, created_at)
- VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+	 input_tokens, output_tokens, total_tokens, latency_ms, status, stream, error,
+	 request_headers, upstream_headers, created_at)
+ VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
 
 // usageInsertArgs renders a record into the placeholder arguments, stamping it
 // with the current time.
@@ -45,6 +49,7 @@ func usageInsertArgs(record UsageRecord) []any {
 		nullString(record.Model), nullString(record.Provider), nullInt(record.APIConfigID), nullString(record.TargetURL),
 		record.InputTokens, record.OutputTokens, total,
 		nullInt(record.LatencyMs), nullStatus(record.Status), boolToInt(record.Stream), nullString(record.Error),
+		nullString(record.RequestHeaders), nullString(record.UpstreamHeaders),
 		time.Now().UnixMilli(),
 	}
 }

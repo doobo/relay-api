@@ -26,7 +26,10 @@ type UsageLogRow struct {
 	Status       *int
 	Stream       bool
 	Error        *string
-	CreatedAt    int64
+	// RequestHeaders/UpstreamHeaders are JSON snapshots, nil for older rows.
+	RequestHeaders  *string
+	UpstreamHeaders *string
+	CreatedAt       int64
 }
 
 // UsageFilters narrows a usage-log listing. Zero values mean "no filter".
@@ -41,25 +44,28 @@ type UsageFilters struct {
 }
 
 const usageLogColumns = `id, request_id, api_key_id, kind, model, provider, api_config_id, target_url,
-	input_tokens, output_tokens, total_tokens, latency_ms, status, stream, error, created_at`
+	input_tokens, output_tokens, total_tokens, latency_ms, status, stream, error,
+	request_headers, upstream_headers, created_at`
 
 func scanUsageLog(row interface{ Scan(...any) error }) (*UsageLogRow, error) {
 	var (
-		entry       UsageLogRow
-		apiKeyID    sql.NullInt64
-		model       sql.NullString
-		provider    sql.NullString
-		configID    sql.NullInt64
-		targetURL   sql.NullString
-		latency     sql.NullInt64
-		status      sql.NullInt64
-		stream      int
-		errorDetail sql.NullString
+		entry           UsageLogRow
+		apiKeyID        sql.NullInt64
+		model           sql.NullString
+		provider        sql.NullString
+		configID        sql.NullInt64
+		targetURL       sql.NullString
+		latency         sql.NullInt64
+		status          sql.NullInt64
+		stream          int
+		errorDetail     sql.NullString
+		requestHeaders  sql.NullString
+		upstreamHeaders sql.NullString
 	)
 	if err := row.Scan(
 		&entry.ID, &entry.RequestID, &apiKeyID, &entry.Kind, &model, &provider, &configID, &targetURL,
 		&entry.InputTokens, &entry.OutputTokens, &entry.TotalTokens, &latency, &status, &stream, &errorDetail,
-		&entry.CreatedAt,
+		&requestHeaders, &upstreamHeaders, &entry.CreatedAt,
 	); err != nil {
 		if err == sql.ErrNoRows {
 			return nil, nil
@@ -91,8 +97,19 @@ func scanUsageLog(row interface{ Scan(...any) error }) (*UsageLogRow, error) {
 	if errorDetail.Valid {
 		entry.Error = &errorDetail.String
 	}
+	if requestHeaders.Valid {
+		entry.RequestHeaders = &requestHeaders.String
+	}
+	if upstreamHeaders.Valid {
+		entry.UpstreamHeaders = &upstreamHeaders.String
+	}
 	entry.Stream = stream != 0
 	return &entry, nil
+}
+
+// GetUsageLog loads one usage row (nil when missing).
+func GetUsageLog(id int64) (*UsageLogRow, error) {
+	return scanUsageLog(Get().QueryRow(`SELECT `+usageLogColumns+` FROM usage_logs WHERE id = ?`, id))
 }
 
 // ListUsageLogs returns usage rows newest-first, honoring the given filters.

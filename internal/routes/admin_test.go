@@ -65,7 +65,7 @@ func decodeInto(t *testing.T, recorder *httptest.ResponseRecorder, dst any) {
 
 func TestAdminModelRoutes(t *testing.T) {
 	harness := newAdminHarness(t)
-	provider, err := db.CreateProvider("p1", "openai", "https://example.com", nil, true)
+	provider, err := db.CreateProvider("p1", "openai", "https://example.com", nil, nil, true)
 	if err != nil {
 		t.Fatalf("create provider: %v", err)
 	}
@@ -319,6 +319,82 @@ func TestAdminUsageLogsAndCleanup(t *testing.T) {
 		}
 		if auditCount != 1 {
 			t.Fatalf("cleanup audit rows = %d", auditCount)
+		}
+	})
+}
+
+func TestAdminUsageDetail(t *testing.T) {
+	harness := newAdminHarness(t)
+	requestHeaders := `{"x-user-id":"alice","authorization":"[redacted]"}`
+	upstreamHeaders := `{"x-user-id":"alice","x-opencode-session":"oc-1"}`
+	if _, err := db.Get().Exec(
+		`INSERT INTO usage_logs (request_id, kind, model, status, request_headers, upstream_headers, created_at)
+		 VALUES ('req-detail', 'ai', 'gpt', 200, ?, ?, ?)`,
+		requestHeaders, upstreamHeaders, time.Now().UnixMilli(),
+	); err != nil {
+		t.Fatalf("insert usage: %v", err)
+	}
+	var id int64
+	if err := db.Get().QueryRow(`SELECT id FROM usage_logs WHERE request_id = 'req-detail'`).Scan(&id); err != nil {
+		t.Fatalf("get id: %v", err)
+	}
+
+	recorder := harness.call(t, http.MethodGet, "/admin/usage/"+itoa(id), "")
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", recorder.Code, recorder.Body.String())
+	}
+	var detail usageDetailDTO
+	decodeInto(t, recorder, &detail)
+	if detail.RequestID != "req-detail" || detail.RequestHeaders["x-user-id"] != "alice" ||
+		detail.UpstreamHeaders["x-opencode-session"] != "oc-1" {
+		t.Fatalf("unexpected detail: %+v", detail)
+	}
+
+	missing := harness.call(t, http.MethodGet, "/admin/usage/9999", "")
+	if missing.Code != http.StatusNotFound {
+		t.Fatalf("missing status = %d", missing.Code)
+	}
+}
+
+func TestAdminProviderHeaders(t *testing.T) {
+	harness := newAdminHarness(t)
+
+	recorder := harness.call(t, http.MethodPost, "/admin/providers",
+		`{"name":"custom","type":"openai","baseUrl":"https://example.com","headers":{"x-user-id":"${uuid}","x-session":"${_ai_session}"}}`)
+	if recorder.Code != http.StatusCreated {
+		t.Fatalf("create status = %d, body = %s", recorder.Code, recorder.Body.String())
+	}
+	var created providerDTO
+	decodeInto(t, recorder, &created)
+	if created.Headers["x-user-id"] != "${uuid}" || created.Headers["x-session"] != "${_ai_session}" {
+		t.Fatalf("unexpected headers: %+v", created.Headers)
+	}
+
+	recorder = harness.call(t, http.MethodPut, "/admin/providers/"+itoa(created.ID),
+		`{"headers":{"x-static":"fixed"}}`)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("update status = %d, body = %s", recorder.Code, recorder.Body.String())
+	}
+	var updated providerDTO
+	decodeInto(t, recorder, &updated)
+	if len(updated.Headers) != 1 || updated.Headers["x-static"] != "fixed" {
+		t.Fatalf("unexpected updated headers: %+v", updated.Headers)
+	}
+
+	t.Run("empty object clears headers", func(t *testing.T) {
+		recorder := harness.call(t, http.MethodPut, "/admin/providers/"+itoa(created.ID), `{"headers":{}}`)
+		var cleared providerDTO
+		decodeInto(t, recorder, &cleared)
+		if len(cleared.Headers) != 0 {
+			t.Fatalf("headers not cleared: %+v", cleared.Headers)
+		}
+	})
+
+	t.Run("invalid header name is rejected", func(t *testing.T) {
+		recorder := harness.call(t, http.MethodPut, "/admin/providers/"+itoa(created.ID),
+			`{"headers":{"bad header":"value"}}`)
+		if recorder.Code != http.StatusBadRequest {
+			t.Fatalf("status = %d, body = %s", recorder.Code, recorder.Body.String())
 		}
 	})
 }
