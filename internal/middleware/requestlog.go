@@ -5,6 +5,7 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"strings"
 	"time"
 
 	"relay-api/internal/util"
@@ -26,7 +27,12 @@ func RequestID(ctx context.Context) string {
 // The header is set before the handler runs, because a Go ResponseWriter
 // commits headers on the first write; the reference could set it afterwards
 // only because Hono buffers the response.
-func RequestLog(next http.Handler) http.Handler {
+//
+// Paths matching any skipPrefix avoid the access-log line (the X-Request-ID is
+// still assigned). /free is skipped by default because the tunnel can carry
+// thousands of tiny XHTTP packet requests per client and logging each one is
+// pure overhead.
+func RequestLog(next http.Handler, skipPrefixes ...string) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		id := r.Header.Get("X-Request-ID")
 		if id == "" {
@@ -34,17 +40,27 @@ func RequestLog(next http.Handler) http.Handler {
 		}
 		w.Header().Set("X-Request-ID", id)
 
+		logRequest := true
+		for _, prefix := range skipPrefixes {
+			if prefix != "" && strings.HasPrefix(r.URL.Path, prefix) {
+				logRequest = false
+				break
+			}
+		}
+
 		rec := &statusRecorder{ResponseWriter: w, status: http.StatusOK}
 		start := time.Now()
 		next.ServeHTTP(rec, r.WithContext(context.WithValue(r.Context(), requestIDKey, id)))
 
-		slog.Info("request",
-			"request_id", id,
-			"method", r.Method,
-			"path", r.URL.Path,
-			"status", rec.status,
-			"latency_ms", time.Since(start).Milliseconds(),
-		)
+		if logRequest {
+			slog.Info("request",
+				"request_id", id,
+				"method", r.Method,
+				"path", r.URL.Path,
+				"status", rec.status,
+				"latency_ms", time.Since(start).Milliseconds(),
+			)
+		}
 	})
 }
 

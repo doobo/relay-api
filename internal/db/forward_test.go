@@ -50,6 +50,20 @@ func TestResolveAPIConfigCacheInvalidation(t *testing.T) {
 		t.Fatal("renamed config not served after update")
 	}
 
+	// A config created after the cache is warm must be visible immediately.
+	createdLate, err := CreateAPIConfig(NewAPIConfig{
+		Name: "late", Method: "POST", URL: "http://example.com", Route: "free", Enabled: true,
+	})
+	if err != nil {
+		t.Fatalf("create late config: %v", err)
+	}
+	if config := resolve(t, "late"); config == nil || config.ID != createdLate.ID {
+		t.Fatalf("config created after warm cache not served: %+v", config)
+	}
+	if removed, err := DeleteAPIConfig(createdLate.ID); err != nil || !removed {
+		t.Fatalf("delete late config: removed=%v err=%v", removed, err)
+	}
+
 	// A delete must also drop it from the cache.
 	if removed, err := DeleteAPIConfig(created.ID); err != nil || !removed {
 		t.Fatalf("delete config: removed=%v err=%v", removed, err)

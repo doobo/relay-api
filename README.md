@@ -62,6 +62,9 @@ CGO_ENABLED=0 go build -trimpath -ldflags "-s -w" -o relay-api .
 | `REQUEST_SIZE_LIMIT_MB` | `10` | `/v1/*` 与 `/open/*` 的请求体大小上限（MB）；`/free/*` 不受此限制 |
 | `REQUEST_TIMEOUT_MS` | `120000` | 非流式聊天请求与 `/open/*` 转发的上游超时（毫秒） |
 | `STREAM_IDLE_TIMEOUT_MS` | `60000` | SSE 流无数据块的最长空闲时间（毫秒），超时主动断开 |
+| `ACCESS_LOG_SKIP_PREFIXES` | `/free` | 不写访问日志的路径前缀（逗号分隔）；请求 ID 仍会生成，设为空可记录所有请求 |
+| `TUNNEL_USAGE_SAMPLE` | `1` | `/free` 成功请求写入用量日志的采样率，`N` 表示每 N 条记录 1 条；错误请求始终记录 |
+| `USAGE_HEADER_SNAPSHOTS` | `true` | 是否在用量日志中保存请求/上游 header 快照；设为 `false` 可减少 CPU 开销与数据库体积 |
 | `LOG_RETENTION_DAYS` | `7` | 用量/审计日志保留天数；设为 `0` 关闭清理任务 |
 | `LOG_CLEANUP_TIME` | `03:00` | 每日清理任务的本地时间（`HH:MM`），格式非法时回退到 `03:00` |
 | `SECRET_ENCRYPTION_KEY` | 空 | 32 字节 base64 密钥，优先级高于密钥文件；`openssl rand -base64 32` 可生成 |

@@ -106,7 +106,7 @@ func enforceQuotas(key db.APIKeyRow) (string, bool) {
 		key.MonthlyRequestLimit <= 0 && key.MonthlyTokenLimit <= 0 {
 		return "", false
 	}
-	usage, err := db.APIKeyQuotaUsage(key.ID)
+	usage, err := db.APIKeyQuotaUsageCached(key.ID)
 	if err != nil {
 		return "", false
 	}

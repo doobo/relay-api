@@ -52,8 +52,10 @@ func Open(path string) (*sql.DB, error) {
 	mu.Lock()
 	handle = sqlDB
 	mu.Unlock()
-	// Drop any config set cached against a previous handle.
+	// Drop anything cached against a previous handle: the config set, auth
+	// keys, quota counters and any resolver's routing generation.
 	invalidateAPIConfigCache()
+	resetHotCaches()
 	startUsageWriter()
 	return sqlDB, nil
 }
@@ -94,6 +96,7 @@ func Close() error {
 	}
 	err := handle.Close()
 	handle = nil
+	resetHotCaches()
 	return err
 }
 

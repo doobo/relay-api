@@ -1,11 +1,13 @@
 package routes
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"io"
 	"net/http"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"relay-api/internal/db"
@@ -76,7 +78,10 @@ func (g *Gateway) chat(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	requestHeaders := snapshotHTTPHeaders(r.Header)
+	var requestHeaders *string
+	if g.cfg.UsageHeaderSnapshots {
+		requestHeaders = snapshotHTTPHeaders(r.Header)
+	}
 	var upstreamHeaders *string
 
 	providerRequest := providers.Request{
@@ -88,7 +93,9 @@ func (g *Gateway) chat(w http.ResponseWriter, r *http.Request) {
 		ClientHeaders: clientHeaders,
 		Session:       middleware.AISessionFrom(r.Context()),
 		OnUpstreamHeaders: func(headers map[string]string) {
-			upstreamHeaders = snapshotHeaderMap(headers)
+			if g.cfg.UsageHeaderSnapshots {
+				upstreamHeaders = snapshotHeaderMap(headers)
+			}
 		},
 	}
 
@@ -106,8 +113,12 @@ func (g *Gateway) chat(w http.ResponseWriter, r *http.Request) {
 		request.Model = route.UpstreamModel
 
 		if stream {
-			upstream, err := provider.ChatStream(r.Context(), request)
+			// The stream gets its own cancelable context so the idle-timeout
+			// timer can abort a stalled upstream read.
+			streamCtx, cancelStream := context.WithCancel(r.Context())
+			upstream, err := provider.ChatStream(streamCtx, request)
 			if err != nil {
+				cancelStream()
 				if shouldFailover(err) {
 					lastErr = err
 					continue
@@ -115,7 +126,7 @@ func (g *Gateway) chat(w http.ResponseWriter, r *http.Request) {
 				g.writeUpstreamError(w, r, err, apiKeyID, model, route.Provider.Name, startedAt, true, requestHeaders, upstreamHeaders)
 				return
 			}
-			g.writeStream(w, r, upstream, streamMeta{
+			g.writeStream(w, r, upstream, cancelStream, streamMeta{
 				requestID:       requestID,
 				apiKeyID:        apiKeyID,
 				model:           model,
@@ -242,8 +253,9 @@ type streamMeta struct {
 
 // writeStream forwards the upstream SSE stream chunk by chunk, enforcing an
 // idle timeout and accumulating token usage as it goes.
-func (g *Gateway) writeStream(w http.ResponseWriter, r *http.Request, upstream *http.Response, meta streamMeta) {
+func (g *Gateway) writeStream(w http.ResponseWriter, r *http.Request, upstream *http.Response, cancelUpstream context.CancelFunc, meta streamMeta) {
 	defer upstream.Body.Close()
+	defer cancelUpstream()
 
 	flusher, _ := w.(http.Flusher)
 	w.Header().Set("content-type", "text/event-stream")
@@ -254,6 +266,11 @@ func (g *Gateway) writeStream(w http.ResponseWriter, r *http.Request, upstream *
 
 	promptTokens, completionTokens := 0, 0
 	parser := util.NewSSEParser(func(event util.SSEEvent) {
+		// Most chunks carry no usage object; skip the JSON decode unless the
+		// key is present at all.
+		if !strings.Contains(event.Data, `"usage"`) {
+			return
+		}
 		var parsed struct {
 			Usage *struct {
 				PromptTokens     int `json:"prompt_tokens"`
@@ -270,78 +287,53 @@ func (g *Gateway) writeStream(w http.ResponseWriter, r *http.Request, upstream *
 		}
 	})
 
-	type readChunk struct {
-		data []byte
-		err  error
-	}
-	chunks := make(chan readChunk)
-	go func() {
-		defer close(chunks)
-		buffer := make([]byte, 32*1024)
-		for {
-			n, err := upstream.Body.Read(buffer)
-			if n > 0 {
-				chunk := make([]byte, n)
-				copy(chunk, buffer[:n])
-				select {
-				case chunks <- readChunk{data: chunk}:
-				case <-r.Context().Done():
-					return
-				}
-			}
-			if err != nil {
-				select {
-				case chunks <- readChunk{err: err}:
-				case <-r.Context().Done():
-				}
-				return
-			}
-		}
-	}()
-
 	idle := time.Duration(g.cfg.StreamIdleTimeoutMs) * time.Millisecond
 	if idle <= 0 {
 		idle = 24 * time.Hour
 	}
-	timer := time.NewTimer(idle)
+	// A timer cancels the upstream read instead of a reader goroutine feeding a
+	// channel: reads happen directly in this loop, so there is no per-chunk
+	// allocation or goroutine hand-off on the streaming hot path.
+	var idleTimedOut atomic.Bool
+	timer := time.AfterFunc(idle, func() {
+		idleTimedOut.Store(true)
+		cancelUpstream()
+	})
 	defer timer.Stop()
 
 	status := http.StatusOK
-streamLoop:
+	buffer := make([]byte, 32*1024)
+readLoop:
 	for {
-		select {
-		case <-r.Context().Done():
-			// Client went away: stop without recording a server error.
-			return
-		case <-timer.C:
-			break streamLoop // idle timeout closes the stream
-		case chunk, ok := <-chunks:
-			if !ok {
+		n, readErr := upstream.Body.Read(buffer)
+		if n > 0 {
+			timer.Reset(idle)
+			// Deliver the chunk before parsing it so usage accounting never
+			// sits between the upstream byte and the client.
+			if _, err := w.Write(buffer[:n]); err != nil {
+				return
+			}
+			if flusher != nil {
+				flusher.Flush()
+			}
+			parser.Push(string(buffer[:n]))
+		}
+		if readErr != nil {
+			switch {
+			case idleTimedOut.Load():
+				// Idle timeout: close the stream the same way the old
+				// timer-based loop did (recorded with the default 200).
 				parser.Flush()
-				break streamLoop
-			}
-			if len(chunk.data) > 0 {
-				if !timer.Stop() {
-					select {
-					case <-timer.C:
-					default:
-					}
-				}
-				timer.Reset(idle)
-				parser.Push(string(chunk.data))
-				if _, err := w.Write(chunk.data); err != nil {
-					return
-				}
-				if flusher != nil {
-					flusher.Flush()
-				}
-			}
-			if chunk.err != nil {
-				if !errors.Is(chunk.err, io.EOF) {
+				break readLoop
+			case r.Context().Err() != nil:
+				// Client went away: stop without recording a server error.
+				return
+			default:
+				if !errors.Is(readErr, io.EOF) {
 					status = http.StatusBadGateway
 				}
 				parser.Flush()
-				break streamLoop
+				break readLoop
 			}
 		}
 	}

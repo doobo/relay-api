@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"log/slog"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -58,8 +59,28 @@ func usageInsertArgs(record UsageRecord) []any {
 // for callers that must see the row before returning (admin tooling, tests);
 // the high-frequency tunnel path uses RecordUsageAsync instead.
 func RecordUsage(record UsageRecord) error {
+	noteUsage(record)
+	return insertUsage(record)
+}
+
+func insertUsage(record UsageRecord) error {
 	_, err := Get().Exec(usageInsertSQL, usageInsertArgs(record)...)
 	return err
+}
+
+// noteUsage advances the in-memory quota counters for a record. It runs before
+// the insert is queued so quota checks never have to wait for the batch
+// writer, and it counts even a record that is later dropped: enforcement errs
+// on the side of the quota.
+func noteUsage(record UsageRecord) {
+	if record.APIKeyID == nil {
+		return
+	}
+	total := record.TotalTokens
+	if total == 0 {
+		total = record.InputTokens + record.OutputTokens
+	}
+	addAPIKeyQuotaUsage(*record.APIKeyID, total)
 }
 
 // Async usage recording. /free tunnels are high-frequency (XHTTP packet mode
@@ -69,16 +90,41 @@ func RecordUsage(record UsageRecord) error {
 // Records are queued here and drained by one writer goroutine into batched
 // transactions, keeping the request path free of the write.
 const (
-	usageQueueSize  = 1024
-	usageBatchSize  = 200
+	// A deep queue absorbs XHTTP packet-mode bursts (many small requests at
+	// once) without pushing a synchronous INSERT back onto the relay path.
+	usageQueueSize  = 8192
+	usageBatchSize  = 500
 	usageFlushEvery = 250 * time.Millisecond
 )
+
+// droppedUsage counts records discarded because the queue was full. Usage is
+// best-effort telemetry: blocking the relay on an INSERT is worse than losing
+// a row, and the warning below (rate-limited) makes the condition visible.
+var (
+	droppedUsage      atomic.Uint64
+	droppedUsageLogAt atomic.Int64
+)
+
+const droppedUsageLogInterval = 10 * time.Second
+
+func noteDroppedUsage() {
+	total := droppedUsage.Add(1)
+	now := time.Now().UnixMilli()
+	last := droppedUsageLogAt.Load()
+	if now-last < droppedUsageLogInterval.Milliseconds() {
+		return
+	}
+	if droppedUsageLogAt.CompareAndSwap(last, now) {
+		slog.Warn("usage queue full; dropping telemetry", "dropped_total", total)
+	}
+}
 
 // usageMessage is one queue item: either a record to store, or a barrier whose
 // close signals that everything queued before it has been flushed.
 type usageMessage struct {
-	record  UsageRecord
-	barrier chan struct{}
+	record   UsageRecord
+	markUsed *int64
+	barrier  chan struct{}
 }
 
 type usageWriter struct {
@@ -120,15 +166,17 @@ func stopUsageWriter() {
 	<-writer.stopped
 }
 
-// RecordUsageAsync queues a record for the batch writer, falling back to a
-// synchronous insert when the writer is not running or its queue is full so a
-// usage row is never silently dropped.
+// RecordUsageAsync queues a record for the batch writer. When the writer is not
+// running (tests, shutdown) it falls back to a synchronous insert; when the
+// queue is full the record is dropped rather than blocking the request on the
+// single SQLite connection.
 func RecordUsageAsync(record UsageRecord) {
+	noteUsage(record)
 	usageMu.Lock()
 	writer := usageActive
 	if writer == nil {
 		usageMu.Unlock()
-		_ = RecordUsage(record)
+		_ = insertUsage(record)
 		return
 	}
 	// Send while holding the lock so stopUsageWriter cannot close the queue
@@ -138,7 +186,7 @@ func RecordUsageAsync(record UsageRecord) {
 		usageMu.Unlock()
 	default:
 		usageMu.Unlock()
-		_ = RecordUsage(record)
+		noteDroppedUsage()
 	}
 }
 
@@ -188,6 +236,15 @@ func (w *usageWriter) run() {
 			if !ok {
 				flush()
 				return
+			}
+			if message.markUsed != nil {
+				if _, err := Get().Exec(
+					`UPDATE api_keys SET last_used_at = ? WHERE id = ?`,
+					time.Now().UnixMilli(), *message.markUsed,
+				); err != nil {
+					slog.Warn("mark api key used", "id", *message.markUsed, "error", err)
+				}
+				continue
 			}
 			if message.barrier != nil {
 				flush()
@@ -296,9 +353,18 @@ func startOfMonthMs(t time.Time) int64 {
 	return time.Date(year, month, 1, 0, 0, 0, 0, t.Location()).UnixMilli()
 }
 
-// GetAPIKeyByHash loads a key by its SHA-256 hash (nil when missing).
+// GetAPIKeyByHash loads a key by its SHA-256 hash (nil when missing). Lookups
+// are served from an in-memory cache, refreshed on any api_keys write.
 func GetAPIKeyByHash(hash string) (*APIKeyRow, error) {
-	return scanAPIKey(Get().QueryRow(`SELECT `+apiKeyColumns+` FROM api_keys WHERE key_hash = ?`, hash))
+	if key, ok := cachedAPIKey(hash); ok {
+		return &key, nil
+	}
+	key, err := scanAPIKey(Get().QueryRow(`SELECT `+apiKeyColumns+` FROM api_keys WHERE key_hash = ?`, hash))
+	if err != nil || key == nil {
+		return key, err
+	}
+	storeAPIKey(hash, *key)
+	return key, nil
 }
 
 // lastUsedInterval throttles last_used_at writes: it is informational, and one
@@ -320,5 +386,30 @@ func MarkAPIKeyUsed(id int64) {
 	}
 	lastUsedWrites[id] = now
 	lastUsedMu.Unlock()
+	// last_used_at is informational; hand the UPDATE to the batch writer so a
+	// request never waits on the single SQLite connection for it.
+	if enqueueMarkUsed(id) {
+		return
+	}
 	_, _ = Get().Exec(`UPDATE api_keys SET last_used_at = ? WHERE id = ?`, now, id)
+}
+
+// enqueueMarkUsed hands a last_used_at update to the usage writer. It reports
+// false when the writer is not running or its queue is full, in which case the
+// caller writes synchronously.
+func enqueueMarkUsed(id int64) bool {
+	usageMu.Lock()
+	writer := usageActive
+	if writer == nil {
+		usageMu.Unlock()
+		return false
+	}
+	select {
+	case writer.queue <- usageMessage{markUsed: &id}:
+		usageMu.Unlock()
+		return true
+	default:
+		usageMu.Unlock()
+		return false
+	}
 }

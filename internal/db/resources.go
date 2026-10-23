@@ -102,6 +102,7 @@ func CreateProvider(name, kind, baseURL string, apiKey, headers *string, enabled
 	if err != nil {
 		return nil, err
 	}
+	invalidateAIResourceCache()
 	return GetProvider(id)
 }
 
@@ -154,6 +155,7 @@ func UpdateProvider(id int64, patch ProviderPatch) (*ProviderRow, error) {
 	if err != nil {
 		return nil, err
 	}
+	invalidateAIResourceCache()
 	return GetProvider(id)
 }
 
@@ -164,6 +166,9 @@ func DeleteProvider(id int64) (bool, error) {
 		return false, err
 	}
 	affected, err := result.RowsAffected()
+	if affected > 0 {
+		invalidateAIResourceCache()
+	}
 	return affected > 0, err
 }
 
@@ -266,6 +271,7 @@ func CreateModel(name string, providerID int64, upstreamModel string, enabled bo
 	if err != nil {
 		return nil, err
 	}
+	invalidateAIResourceCache()
 	return GetModel(id)
 }
 
@@ -307,6 +313,7 @@ func UpdateModel(id int64, patch ModelPatch) (*ModelRow, error) {
 	if err != nil {
 		return nil, err
 	}
+	invalidateAIResourceCache()
 	return GetModel(id)
 }
 
@@ -317,6 +324,9 @@ func DeleteModel(id int64) (bool, error) {
 		return false, err
 	}
 	affected, err := result.RowsAffected()
+	if affected > 0 {
+		invalidateAIResourceCache()
+	}
 	return affected > 0, err
 }
 
@@ -442,6 +452,7 @@ func CreateAPIKey(input NewAPIKey) (*APIKeyRow, error) {
 	if err != nil {
 		return nil, err
 	}
+	invalidateAPIKeyCache()
 	return GetAPIKey(id)
 }
 
@@ -507,6 +518,7 @@ func UpdateAPIKey(id int64, patch APIKeyPatch) (*APIKeyRow, error) {
 	if err != nil {
 		return nil, err
 	}
+	invalidateAPIKeyCache()
 	return GetAPIKey(id)
 }
 
@@ -517,6 +529,10 @@ func DeleteAPIKey(id int64) (bool, error) {
 		return false, err
 	}
 	affected, err := result.RowsAffected()
+	if affected > 0 {
+		invalidateAPIKeyCache()
+		forgetQuotaCounter(id)
+	}
 	return affected > 0, err
 }
 

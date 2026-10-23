@@ -579,17 +579,17 @@ func (p *Responses) ChatStream(ctx context.Context, request Request) (*http.Resp
 	hasToolCall := false
 	promptTokens, completionTokens, totalTokens := 0, 0, 0
 
-	reader, writer := io.Pipe()
+	pipe := util.NewBufferedPipe()
 	go func() {
 		defer upstream.Body.Close()
-		defer writer.Close()
+		defer pipe.Close()
 
 		send := func(payload any) error {
 			encoded, err := json.Marshal(payload)
 			if err != nil {
 				return err
 			}
-			_, err = writer.Write([]byte("data: " + string(encoded) + "\n\n"))
+			_, err = pipe.Write([]byte("data: " + string(encoded) + "\n\n"))
 			return err
 		}
 		chunk := func(delta map[string]any, finish any) map[string]any {
@@ -789,7 +789,7 @@ func (p *Responses) ChatStream(ctx context.Context, request Request) (*http.Resp
 				}
 				sendRole()
 				finish(reason)
-				_, _ = writer.Write([]byte("data: [DONE]\n\n"))
+				_, _ = pipe.Write([]byte("data: [DONE]\n\n"))
 			case "response.failed", "error":
 				message := responsesStreamError(parsed)
 				_ = send(map[string]any{"error": map[string]any{"message": message, "type": "upstream_error"}})
@@ -815,7 +815,7 @@ func (p *Responses) ChatStream(ctx context.Context, request Request) (*http.Resp
 			"Content-Type":  []string{"text/event-stream"},
 			"Cache-Control": []string{"no-cache"},
 		},
-		Body: reader,
+		Body: pipe,
 	}, nil
 }
 

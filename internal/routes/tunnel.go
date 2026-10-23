@@ -6,6 +6,8 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"time"
 
 	"relay-api/internal/db"
@@ -32,11 +34,37 @@ var errBodyTooLarge = errors.New(bodyLimitMarker)
 // and per-config size/time limits still apply.
 type TunnelRoutes struct {
 	secrets *util.SecretBox
+
+	// usageSample records one in N successful tunnel requests. XHTTP packet
+	// mode turns a single client into thousands of tiny requests, so writing a
+	// usage row for every one of them is mostly noise; errors are always
+	// recorded. 1 (the default) records every request.
+	usageSample int
+	usageSeq    atomic.Uint64
 }
 
 // NewTunnelRoutes builds the tunnel handler.
 func NewTunnelRoutes(secrets *util.SecretBox) *TunnelRoutes {
-	return &TunnelRoutes{secrets: secrets}
+	return &TunnelRoutes{secrets: secrets, usageSample: 1}
+}
+
+// SetUsageSample records one in every n successful tunnel requests. n <= 1
+// keeps every request.
+func (h *TunnelRoutes) SetUsageSample(n int) {
+	if n < 1 {
+		n = 1
+	}
+	h.usageSample = n
+}
+
+// shouldRecord decides whether a tunnel response is written to usage_logs under
+// the configured sampling rate. Only successful responses are sampled.
+func (h *TunnelRoutes) shouldRecord(status int, errMsg *string) bool {
+	if h.usageSample <= 1 || errMsg != nil || status < 200 || status >= 300 {
+		return true
+	}
+	seq := h.usageSeq.Add(1)
+	return (seq-1)%uint64(h.usageSample) == 0
 }
 
 // Register mounts the catch-all handler under prefix.
@@ -66,6 +94,9 @@ func (h *TunnelRoutes) handle(w http.ResponseWriter, r *http.Request) {
 
 	var targetURL *string
 	record := func(status int, errMsg *string) {
+		if !h.shouldRecord(status, errMsg) {
+			return
+		}
 		configID := apiConfig.ID
 		latency := time.Since(startedAt).Milliseconds()
 		db.RecordUsageAsync(db.UsageRecord{
@@ -85,32 +116,38 @@ func (h *TunnelRoutes) handle(w http.ResponseWriter, r *http.Request) {
 	// up) could never both be served.
 	clientMethod := strings.ToUpper(r.Method)
 
-	clientHeaders := map[string]string{}
-	for key, values := range r.Header {
-		if len(values) > 0 {
-			clientHeaders[strings.ToLower(key)] = values[0]
-		}
-	}
+	configHeaders := parseStringMap(apiConfig.Headers)
 
 	// Config headers still work, but only headers/query can be templated: a
-	// tunnel never parses the body, so {{body.*}} has nothing to read.
-	headersContext := map[string]any{}
-	for key, value := range clientHeaders {
-		headersContext[key] = value
-	}
-	queryContext := map[string]any{}
-	for key, values := range r.URL.Query() {
-		if len(values) > 0 {
-			queryContext[key] = values[0]
+	// tunnel never parses the body, so {{body.*}} has nothing to read. Building
+	// the template context is skipped entirely for the common static-header
+	// case, and the upstream map is built in a single header pass.
+	var templateContext map[string]any
+	if hasTemplatePlaceholder(configHeaders) {
+		headersContext := map[string]any{}
+		for key, values := range r.Header {
+			if len(values) > 0 {
+				headersContext[strings.ToLower(key)] = values[0]
+			}
 		}
+		queryContext := map[string]any{}
+		for key, values := range r.URL.Query() {
+			if len(values) > 0 {
+				queryContext[key] = values[0]
+			}
+		}
+		templateContext = map[string]any{"headers": headersContext, "query": queryContext, "body": nil}
 	}
-	templateContext := map[string]any{"headers": headersContext, "query": queryContext, "body": nil}
 
 	renderedConfigHeaders := map[string]string{}
-	for key, value := range parseStringMap(apiConfig.Headers) {
-		renderedConfigHeaders[key] = asString(util.RenderTemplate(value, templateContext))
+	for key, value := range configHeaders {
+		if strings.Contains(value, "{{") {
+			renderedConfigHeaders[key] = asString(util.RenderTemplate(value, templateContext))
+		} else {
+			renderedConfigHeaders[key] = value
+		}
 	}
-	upstreamHeaders := util.FilterRequestHeaders(clientHeaders)
+	upstreamHeaders := util.ForwardedRequestHeaders(r.Header)
 	for key, value := range renderedConfigHeaders {
 		upstreamHeaders[key] = value
 	}
@@ -263,6 +300,16 @@ const (
 	tunnelFlushInterval = 200 * time.Microsecond
 )
 
+// tunnelBufferPool recycles the per-response copy buffer. A high-frequency
+// tunnel would otherwise allocate 256 KiB for every short request, which is
+// pure GC pressure at packet-mode rates.
+var tunnelBufferPool = sync.Pool{
+	New: func() any {
+		buffer := make([]byte, tunnelCopyBuffer)
+		return &buffer
+	},
+}
+
 // copyAndFlush streams src into w so a long-lived response is delivered as it
 // is produced. It flushes once enough has accumulated, once a short read shows
 // nothing more is buffered upstream (so the client sees it immediately), or
@@ -274,7 +321,9 @@ func copyAndFlush(w http.ResponseWriter, src io.Reader) {
 		_, _ = io.Copy(w, src)
 		return
 	}
-	buffer := make([]byte, tunnelCopyBuffer)
+	bufferPtr := tunnelBufferPool.Get().(*[]byte)
+	defer tunnelBufferPool.Put(bufferPtr)
+	buffer := *bufferPtr
 	var pending int
 	lastFlush := time.Now()
 	for {

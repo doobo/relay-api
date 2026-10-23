@@ -75,6 +75,11 @@ func (h *ForwardRoutes) handle(w http.ResponseWriter, r *http.Request) {
 		}
 		configID := apiConfig.ID
 		latency := time.Since(startedAt).Milliseconds()
+		var requestHeaders, upstreamSnapshot *string
+		if h.cfg.UsageHeaderSnapshots {
+			requestHeaders = snapshotHTTPHeaders(r.Header)
+			upstreamSnapshot = snapshotHeaderMap(upstreamHeaders)
+		}
 		db.RecordUsageAsync(db.UsageRecord{
 			RequestID:       requestID,
 			APIKeyID:        keyPtr,
@@ -84,52 +89,60 @@ func (h *ForwardRoutes) handle(w http.ResponseWriter, r *http.Request) {
 			LatencyMs:       &latency,
 			Status:          &status,
 			Error:           errMsg,
-			RequestHeaders:  snapshotHTTPHeaders(r.Header),
-			UpstreamHeaders: snapshotHeaderMap(upstreamHeaders),
+			RequestHeaders:  requestHeaders,
+			UpstreamHeaders: upstreamSnapshot,
 		})
 	}
 
 	clientMethod := r.Method
 	method := util.ResolveUpstreamMethod(apiConfig.Method, clientMethod)
 
-	clientHeaders := map[string]string{}
-	for key, values := range r.Header {
-		if len(values) > 0 {
-			clientHeaders[strings.ToLower(key)] = values[0]
-		}
-	}
+	rawBody := middleware.RequestBody(r.Context())
+	configHeaders := parseStringMap(apiConfig.Headers)
+	requestTemplate := parseJSONValue(apiConfig.RequestTemplate)
+	needsTemplateContext := requestTemplate != nil || hasTemplatePlaceholder(configHeaders)
 
-	var clientBody any
-	if clientMethod != http.MethodGet && clientMethod != http.MethodHead {
-		if raw := middleware.RequestBody(r.Context()); len(raw) > 0 {
+	// The template context is only built when a template actually references
+	// it. A plain passthrough request skips the JSON parse and the header/query
+	// maps entirely.
+	var templateContext map[string]any
+	if needsTemplateContext {
+		var clientBody any
+		if clientMethod != http.MethodGet && clientMethod != http.MethodHead && len(rawBody) > 0 {
 			var parsed any
-			if json.Unmarshal(raw, &parsed) == nil {
+			if json.Unmarshal(rawBody, &parsed) == nil {
 				clientBody = parsed
 			} else {
-				clientBody = string(raw)
+				clientBody = string(rawBody)
 			}
 		}
-	}
-
-	// Template contexts are plain map[string]any so {{headers.x}} / {{query.x}}
-	// lookups work (templateLookup only descends into JSON-shaped maps).
-	headersContext := map[string]any{}
-	for key, value := range clientHeaders {
-		headersContext[key] = value
-	}
-	queryContext := map[string]any{}
-	for key, values := range r.URL.Query() {
-		if len(values) > 0 {
-			queryContext[key] = values[0]
+		// Template contexts are plain map[string]any so {{headers.x}} /
+		// {{query.x}} lookups work (templateLookup only descends into
+		// JSON-shaped maps).
+		headersContext := map[string]any{}
+		for key, values := range r.Header {
+			if len(values) > 0 {
+				headersContext[strings.ToLower(key)] = values[0]
+			}
 		}
+		queryContext := map[string]any{}
+		for key, values := range r.URL.Query() {
+			if len(values) > 0 {
+				queryContext[key] = values[0]
+			}
+		}
+		templateContext = map[string]any{"body": clientBody, "headers": headersContext, "query": queryContext}
 	}
-	templateContext := map[string]any{"body": clientBody, "headers": headersContext, "query": queryContext}
 
 	renderedConfigHeaders := map[string]string{}
-	for key, value := range parseStringMap(apiConfig.Headers) {
-		renderedConfigHeaders[key] = asString(util.RenderTemplate(value, templateContext))
+	for key, value := range configHeaders {
+		if strings.Contains(value, "{{") {
+			renderedConfigHeaders[key] = asString(util.RenderTemplate(value, templateContext))
+		} else {
+			renderedConfigHeaders[key] = value
+		}
 	}
-	upstreamHeaders = util.FilterRequestHeaders(clientHeaders)
+	upstreamHeaders = util.ForwardedRequestHeaders(r.Header)
 	for key, value := range renderedConfigHeaders {
 		upstreamHeaders[key] = value
 	}
@@ -158,30 +171,28 @@ func (h *ForwardRoutes) handle(w http.ResponseWriter, r *http.Request) {
 	target := parsedURL.Scheme + "://" + parsedURL.Host + parsedURL.Path
 	targetURL = &target
 
-	requestTemplate := parseJSONValue(apiConfig.RequestTemplate)
-	upstreamBody := clientBody
+	var requestBody io.Reader
 	if requestTemplate != nil {
-		upstreamBody = util.RenderTemplate(requestTemplate, templateContext)
+		upstreamBody := util.RenderTemplate(requestTemplate, templateContext)
 		if unresolved := util.FindUnresolved(requestTemplate, templateContext); len(unresolved) > 0 {
 			message := "Request template has unresolved placeholders: " + strings.Join(unresolved, ", ")
 			record(http.StatusBadRequest, &message)
 			invalidRequest(w, message)
 			return
 		}
-	}
-
-	var requestBody io.Reader
-	if method != http.MethodGet && method != http.MethodHead && upstreamBody != nil {
-		if text, ok := upstreamBody.(string); ok {
-			requestBody = strings.NewReader(text)
-		} else {
-			encoded, err := json.Marshal(upstreamBody)
+		if method != http.MethodGet && method != http.MethodHead && upstreamBody != nil {
+			reader, err := requestBodyReader(upstreamBody)
 			if err != nil {
 				internalError(w, "marshal upstream body", err)
 				return
 			}
-			requestBody = bytes.NewReader(encoded)
+			requestBody = reader
 		}
+	} else if method != http.MethodGet && method != http.MethodHead &&
+		clientMethod != http.MethodGet && clientMethod != http.MethodHead && len(rawBody) > 0 {
+		// Pure passthrough: reuse the bytes BodyParser already buffered rather
+		// than decoding and re-encoding the JSON body.
+		requestBody = bytes.NewReader(rawBody)
 	}
 
 	timeoutMs := apiConfig.TimeoutMs
@@ -256,6 +267,29 @@ func writeUpstreamHeaders(w http.ResponseWriter, header http.Header, requestID s
 		w.Header().Set(key, value)
 	}
 	w.Header().Set("X-Request-ID", requestID)
+}
+
+// requestBodyReader turns a rendered template result into an upstream reader.
+func requestBodyReader(value any) (io.Reader, error) {
+	if text, ok := value.(string); ok {
+		return strings.NewReader(text), nil
+	}
+	encoded, err := json.Marshal(value)
+	if err != nil {
+		return nil, err
+	}
+	return bytes.NewReader(encoded), nil
+}
+
+// hasTemplatePlaceholder reports whether any configured header value needs the
+// template engine.
+func hasTemplatePlaceholder(values map[string]string) bool {
+	for _, value := range values {
+		if strings.Contains(value, "{{") {
+			return true
+		}
+	}
+	return false
 }
 
 // parseStringMap decodes a stored JSON object of strings.

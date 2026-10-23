@@ -101,6 +101,7 @@ func CreateModelRoute(input NewModelRoute) (*ModelRouteRow, error) {
 	if err != nil {
 		return nil, err
 	}
+	invalidateAIResourceCache()
 	return scanModelRoute(Get().QueryRow(`SELECT `+modelRouteColumns+` FROM model_routes WHERE id = ?`, id))
 }
 
@@ -111,6 +112,9 @@ func DeleteModelRoute(id int64) (bool, error) {
 		return false, err
 	}
 	affected, err := result.RowsAffected()
+	if affected > 0 {
+		invalidateAIResourceCache()
+	}
 	return affected > 0, err
 }
 

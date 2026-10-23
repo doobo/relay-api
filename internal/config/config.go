@@ -85,6 +85,16 @@ type Config struct {
 	// long.
 	StreamIdleTimeoutMs int
 
+	// AccessLogSkipPrefixes are request path prefixes whose access-log line is
+	// suppressed (the tunnel is high-frequency by design).
+	AccessLogSkipPrefixes []string
+	// TunnelUsageSample records one in N successful /free requests; 1 records
+	// every request.
+	TunnelUsageSample int
+	// UsageHeaderSnapshots stores request/upstream header JSON on every usage
+	// row. Disabling it saves CPU and keeps usage_logs small.
+	UsageHeaderSnapshots bool
+
 	// LogRetentionDays is how many days of usage/audit logs to keep; 0 disables
 	// the cleanup job.
 	LogRetentionDays int
@@ -110,6 +120,9 @@ func Load() Config {
 		RequestSizeLimitBytes: int64(intEnv("REQUEST_SIZE_LIMIT_MB", 10)) * 1024 * 1024,
 		RequestTimeoutMs:      intEnv("REQUEST_TIMEOUT_MS", 120_000),
 		StreamIdleTimeoutMs:   intEnv("STREAM_IDLE_TIMEOUT_MS", 60_000),
+		AccessLogSkipPrefixes: splitPrefixes(getenv("ACCESS_LOG_SKIP_PREFIXES", "/free")),
+		TunnelUsageSample:     intEnv("TUNNEL_USAGE_SAMPLE", 1),
+		UsageHeaderSnapshots:  boolEnv("USAGE_HEADER_SNAPSHOTS", true),
 		LogRetentionDays:      retentionDays(),
 		LogCleanupTime:        parseCleanupTime(os.Getenv("LOG_CLEANUP_TIME")),
 	}
@@ -134,6 +147,31 @@ func intEnv(name string, fallback int) int {
 		return fallback
 	}
 	return n
+}
+
+// splitPrefixes parses a comma-separated path-prefix list, dropping blanks.
+func splitPrefixes(raw string) []string {
+	parts := strings.Split(raw, ",")
+	out := make([]string, 0, len(parts))
+	for _, part := range parts {
+		if trimmed := strings.TrimSpace(part); trimmed != "" {
+			out = append(out, trimmed)
+		}
+	}
+	return out
+}
+
+// boolEnv parses a boolean environment variable, accepting the usual spellings
+// and falling back on blank/invalid input.
+func boolEnv(name string, fallback bool) bool {
+	switch strings.ToLower(strings.TrimSpace(os.Getenv(name))) {
+	case "1", "true", "yes", "on":
+		return true
+	case "0", "false", "no", "off":
+		return false
+	default:
+		return fallback
+	}
 }
 
 func parseLogLevel(raw string) LogLevel {

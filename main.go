@@ -94,7 +94,9 @@ func main() {
 	// API-key auth in front of it - its bodies are piped unread and its per
 	// config limits are enforced inside the handler while streaming.
 	freeMux := http.NewServeMux()
-	routes.NewTunnelRoutes(secrets).Register(freeMux, "/free")
+	tunnelRoutes := routes.NewTunnelRoutes(secrets)
+	tunnelRoutes.SetUsageSample(cfg.TunnelUsageSample)
+	tunnelRoutes.Register(freeMux, "/free")
 	freeMux.HandleFunc("/", func(w http.ResponseWriter, _ *http.Request) { httperr.NotFound(w) })
 
 	mux := http.NewServeMux()
@@ -128,7 +130,7 @@ func main() {
 	}
 	srv := &http.Server{
 		Addr:              ":" + strconv.Itoa(cfg.Port),
-		Handler:           h2c.NewHandler(middleware.RequestLog(mux), h2s),
+		Handler:           h2c.NewHandler(middleware.RequestLog(mux, cfg.AccessLogSkipPrefixes...), h2s),
 		ReadHeaderTimeout: 10 * time.Second,
 		// Deliberately no WriteTimeout/ReadTimeout: SSE chat streams and the
 		// /free tunnel are long-lived. Idle control lives in the handlers

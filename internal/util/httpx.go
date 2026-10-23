@@ -27,19 +27,36 @@ var ErrUpstreamTimeout = errors.New("upstream timeout")
 // client into many parallel POST/GET streams, which makes that default the
 // largest throughput limiter when relaying it, so the pool is widened here.
 const (
-	maxIdleConns        = 512
-	maxIdleConnsPerHost = 64
+	maxIdleConns        = 1024
+	maxIdleConnsPerHost = 256
 	idleConnTimeout     = 90 * time.Second
+	dialTimeout         = 10 * time.Second
+	dialKeepAlive       = 30 * time.Second
+	tlsSessionCacheSize = 256
 )
 
 // httpsTransport serves TLS upstreams (and plaintext HTTP/1.1 upstreams while
 // h2c is disabled). ForceAttemptHTTP2 lets https endpoints negotiate HTTP/2.
+//
+// A custom TLSClientConfig (the session cache) and DialContext disable the
+// standard library's implicit HTTP/2 setup, so ForceAttemptHTTP2 has to stay
+// true. The session cache lets a freshly dialed connection resume instead of
+// performing a full TLS handshake, which matters when an upstream pool grows
+// during a burst.
 var httpsTransport = &http.Transport{
 	Proxy:               http.ProxyFromEnvironment,
 	ForceAttemptHTTP2:   true,
 	MaxIdleConns:        maxIdleConns,
 	MaxIdleConnsPerHost: maxIdleConnsPerHost,
 	IdleConnTimeout:     idleConnTimeout,
+	TLSHandshakeTimeout: dialTimeout,
+	DialContext: (&net.Dialer{
+		Timeout:   dialTimeout,
+		KeepAlive: dialKeepAlive,
+	}).DialContext,
+	TLSClientConfig: &tls.Config{
+		ClientSessionCache: tls.NewLRUClientSessionCache(tlsSessionCacheSize),
+	},
 }
 
 // h2cTransport serves cleartext HTTP/2 upstreams. It is nil unless
@@ -181,6 +198,25 @@ var responseHeaderBlocklist = map[string]bool{
 	"transfer-encoding": true,
 	"content-encoding":  true,
 	"set-cookie":        true,
+}
+
+// ForwardedRequestHeaders builds the upstream header map directly from a client
+// header set, lowercasing each name once and dropping hop-by-hop/auth headers.
+// It is the single-pass equivalent of normalizing a header set and then calling
+// FilterRequestHeaders.
+func ForwardedRequestHeaders(headers http.Header) map[string]string {
+	out := make(map[string]string, len(headers))
+	for key, values := range headers {
+		if len(values) == 0 {
+			continue
+		}
+		name := strings.ToLower(key)
+		if requestHeaderBlocklist[name] {
+			continue
+		}
+		out[name] = values[0]
+	}
+	return out
 }
 
 // FilterRequestHeaders drops blocked headers from a client header set.

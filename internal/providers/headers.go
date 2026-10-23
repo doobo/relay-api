@@ -16,6 +16,10 @@ var headerPlaceholderPattern = regexp.MustCompile(`\$\{\s*(headers\.)?([\w-]+)\s
 // placeholders become empty so a header can be omitted rather than sent with a
 // literal template.
 func renderHeaderValue(template string, request Request) string {
+	// Most provider headers are static; skip the regex machinery entirely.
+	if !strings.Contains(template, "${") {
+		return sanitizeHeaderValue(template)
+	}
 	rendered := headerPlaceholderPattern.ReplaceAllStringFunc(template, func(match string) string {
 		parts := headerPlaceholderPattern.FindStringSubmatch(match)
 		name := strings.ToLower(parts[2])
@@ -24,7 +28,18 @@ func renderHeaderValue(template string, request Request) string {
 		}
 		return request.ClientHeaders[name]
 	})
-	return strings.Map(sanitizeHeaderRune, rendered)
+	return sanitizeHeaderValue(rendered)
+}
+
+// sanitizeHeaderValue strips control characters only when present. The common
+// case (a clean static header value) is returned without allocating.
+func sanitizeHeaderValue(value string) string {
+	for index := 0; index < len(value); index++ {
+		if value[index] < 0x20 || value[index] == 0x7f {
+			return strings.Map(sanitizeHeaderRune, value)
+		}
+	}
+	return value
 }
 
 // sanitizeHeaderRune drops control characters that would make net/http reject

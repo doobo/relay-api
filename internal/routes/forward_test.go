@@ -181,6 +181,17 @@ func TestForward(t *testing.T) {
 		}
 	})
 
+	t.Run("passthrough preserves the raw body bytes", func(t *testing.T) {
+		body := "{\n  \"k\":  \"v\",\n  \"n\": 1\n}"
+		recorder := call(t, http.MethodPost, "/open/api/users/1", fullKey, body, nil)
+		if recorder.Code != http.StatusOK {
+			t.Fatalf("status = %d, body = %s", recorder.Code, recorder.Body.String())
+		}
+		if seen := capture(); seen.Body != body {
+			t.Fatalf("raw body not preserved: got %q want %q", seen.Body, body)
+		}
+	})
+
 	t.Run("method NONE follows the client verb", func(t *testing.T) {
 		recorder := call(t, http.MethodGet, "/open/any", fullKey, "", nil)
 		if recorder.Code != http.StatusOK {
