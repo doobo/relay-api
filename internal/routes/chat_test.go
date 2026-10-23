@@ -62,6 +62,7 @@ func TestGateway(t *testing.T) {
 	badProvider := mustProvider(t, "bad", "openai", bad.URL)
 	goodProvider := mustProvider(t, "good", "openai", good.URL)
 	anthropicProvider := mustProvider(t, "claude", "anthropic", good.URL)
+	responsesProvider := mustProvider(t, "responses", "openai-responses", good.URL)
 	rejectProvider := mustProvider(t, "reject", "openai", reject.URL)
 	headersJSON := `{"x-user-id":"${x-user-id}","x-session":"${_ai_session}","x-static":"fixed"}`
 	headerProviderRow, err := db.CreateProvider("headers", "openai", headerUpstream.URL, nil, &headersJSON, true)
@@ -76,6 +77,9 @@ func TestGateway(t *testing.T) {
 	insertRoute(t, "m", badProvider, 1)
 	insertRoute(t, "m", goodProvider, 2)
 	if _, err := db.CreateModel("claude", anthropicProvider, "claude-x", true, 100); err != nil {
+		t.Fatalf("create model: %v", err)
+	}
+	if _, err := db.CreateModel("gpt", responsesProvider, "gpt-6-luna", true, 100); err != nil {
 		t.Fatalf("create model: %v", err)
 	}
 	if _, err := db.CreateModel("e400", rejectProvider, "upstream-model", true, 100); err != nil {
@@ -197,6 +201,49 @@ func TestGateway(t *testing.T) {
 		}
 		if !strings.Contains(recorder.Body.String(), "bad request") {
 			t.Fatalf("body not passed through: %s", recorder.Body.String())
+		}
+	})
+
+	t.Run("responses non-stream", func(t *testing.T) {
+		recorder := do(t, `{"model":"gpt","messages":[{"role":"user","content":"hi"}]}`)
+		if recorder.Code != http.StatusOK {
+			t.Fatalf("status = %d, body = %s", recorder.Code, recorder.Body.String())
+		}
+		var parsed struct {
+			Choices []struct {
+				Message struct {
+					Content   *string `json:"content"`
+					ToolCalls []any   `json:"tool_calls"`
+				} `json:"message"`
+				FinishReason *string `json:"finish_reason"`
+			} `json:"choices"`
+			Usage struct {
+				PromptTokens     int `json:"prompt_tokens"`
+				CompletionTokens int `json:"completion_tokens"`
+			} `json:"usage"`
+		}
+		if err := json.Unmarshal(recorder.Body.Bytes(), &parsed); err != nil {
+			t.Fatalf("decode: %v", err)
+		}
+		if len(parsed.Choices) != 1 || parsed.Choices[0].Message.Content == nil || *parsed.Choices[0].Message.Content != "bonjour" {
+			t.Fatalf("unexpected responses conversion: %s", recorder.Body.String())
+		}
+		if len(parsed.Choices[0].Message.ToolCalls) != 1 || parsed.Choices[0].FinishReason == nil || *parsed.Choices[0].FinishReason != "tool_calls" {
+			t.Fatalf("tool call not mapped: %s", recorder.Body.String())
+		}
+		if parsed.Usage.PromptTokens != 4 || parsed.Usage.CompletionTokens != 2 {
+			t.Fatalf("usage not mapped: %s", recorder.Body.String())
+		}
+	})
+
+	t.Run("responses stream", func(t *testing.T) {
+		recorder := do(t, `{"model":"gpt","stream":true,"messages":[{"role":"user","content":"hi"}]}`)
+		body := recorder.Body.String()
+		if !strings.Contains(body, "chat.completion.chunk") || !strings.Contains(body, `"content":"hi"`) {
+			t.Fatalf("unexpected responses stream: %s", body)
+		}
+		if !strings.Contains(body, `"finish_reason":"stop"`) || !strings.Contains(body, "data: [DONE]") {
+			t.Fatalf("unexpected responses stream finish: %s", body)
 		}
 	})
 
@@ -323,6 +370,25 @@ func healthyUpstream(w http.ResponseWriter, r *http.Request) {
 				"finish_reason": "stop",
 			}},
 			"usage": map[string]any{"prompt_tokens": 3, "completion_tokens": 2, "total_tokens": 5},
+		})
+	case strings.HasSuffix(r.URL.Path, "/responses"):
+		var body map[string]any
+		_ = json.NewDecoder(r.Body).Decode(&body)
+		if stream, _ := body["stream"].(bool); stream {
+			w.Header().Set("content-type", "text/event-stream")
+			_, _ = io.WriteString(w, "event: response.created\ndata: {\"type\":\"response.created\",\"response\":{\"id\":\"resp_s\",\"model\":\"gpt-6-luna\",\"created_at\":1}}\n\n")
+			_, _ = io.WriteString(w, "event: response.output_text.delta\ndata: {\"type\":\"response.output_text.delta\",\"delta\":\"hi\"}\n\n")
+			_, _ = io.WriteString(w, "event: response.completed\ndata: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_s\",\"model\":\"gpt-6-luna\",\"status\":\"completed\",\"usage\":{\"input_tokens\":3,\"output_tokens\":1,\"total_tokens\":4},\"output\":[{\"type\":\"message\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"hi\"}]}]}}\n\n")
+			return
+		}
+		w.Header().Set("content-type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"id": "resp_1", "object": "response", "created_at": 1, "model": "gpt-6-luna", "status": "completed",
+			"output": []any{
+				map[string]any{"type": "message", "role": "assistant", "content": []any{map[string]any{"type": "output_text", "text": "bonjour"}}},
+				map[string]any{"type": "function_call", "id": "fc_1", "call_id": "call_1", "name": "weather", "arguments": "{}"},
+			},
+			"usage": map[string]any{"input_tokens": 4, "output_tokens": 2, "total_tokens": 6},
 		})
 	case strings.HasSuffix(r.URL.Path, "/messages"):
 		var body map[string]any

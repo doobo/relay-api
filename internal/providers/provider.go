@@ -1,5 +1,5 @@
 // Package providers adapts OpenAI-format chat requests onto the different
-// upstream wire formats (openai, anthropic, compatible).
+// upstream wire formats (openai, anthropic, compatible, openai-responses).
 package providers
 
 import (
@@ -51,8 +51,23 @@ type Usage struct {
 
 // Message is the assistant reply.
 type Message struct {
-	Role    string  `json:"role"`
-	Content *string `json:"content"`
+	Role             string     `json:"role"`
+	Content          *string    `json:"content"`
+	ReasoningContent *string    `json:"reasoning_content,omitempty"`
+	ToolCalls        []ToolCall `json:"tool_calls,omitempty"`
+}
+
+// ToolCall is one function call emitted by the assistant.
+type ToolCall struct {
+	ID       string       `json:"id"`
+	Type     string       `json:"type"`
+	Function ToolFunction `json:"function"`
+}
+
+// ToolFunction is the name and JSON-encoded arguments of a tool call.
+type ToolFunction struct {
+	Name      string `json:"name"`
+	Arguments string `json:"arguments"`
 }
 
 // Result is a non-streaming chat completion in OpenAI terms.
@@ -85,6 +100,8 @@ func New(cfg Config) Provider {
 	switch cfg.Type {
 	case "anthropic":
 		return &Anthropic{OpenAI: OpenAI{cfg: cfg}}
+	case "openai-responses":
+		return &Responses{OpenAI: OpenAI{cfg: cfg}}
 	default:
 		// "openai" and "compatible" share the exact same wire format.
 		return &OpenAI{cfg: cfg}

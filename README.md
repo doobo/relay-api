@@ -8,12 +8,23 @@ OpenAI 兼容的 API 中转网关，后端使用 Go 实现，前端管理界面�
 
 - OpenAI 兼容接口：`/v1/models`、`/v1/chat/completions`，支持 SSE 流式响应
 - 多上游管理：provider / model / model-route（优先级 + 故障转移）配置
+- Provider 协议适配：`openai` / `compatible`（Chat Completions）、`anthropic`（Messages）、`openai-responses`（Responses API）
 - Provider 自定义请求头：`${客户端header}` 引入客户端值，`${_ai_session}` 引入解析出的用户会话标识
 - API Key 鉴权与限流，密钥仅存加密值（AES-GCM）
 - 非 AI 场景转发：`/open/*`（需 API Key 的 JSON 转发）、`/free/*`（公开的原始流式隧道）
 - 内嵌管理后台：用户、模型、密钥、配置、用量统计、审计日志、登录限流
 - 审计与用量落库，按 `LOG_RETENTION_DAYS` 每日定时清理；用量日志可点开详情查看客户端与上游请求头（敏感头打码）
 - 单端口 HTTP/1.1 + h2c，`SIGINT`/`SIGTERM` 优雅退出
+
+### Provider 类型
+
+| 类型 | 上游请求 | 说明 |
+| --- | --- | --- |
+| `openai` / `compatible` | `<baseUrl>/chat/completions` | 标准 Chat Completions，`compatible` 与 `openai` 完全相同 |
+| `anthropic` | `<baseUrl>/messages` | Anthropic Messages，自动转换 OpenAI 请求/响应及 SSE |
+| `openai-responses` | `<baseUrl>/responses` | OpenAI Responses API，自动转换文本、图片、工具调用、推理内容和 SSE |
+
+例如 OpenCode Go 的 GPT / Muse 模型只提供 Responses API：Provider 的 `baseUrl` 填 `https://opencode.ai/inference/go/openai/v1`，类型选 `openai-responses`；DeepSeek 等 Chat Completions 模型继续使用 `openai` / `compatible`。
 
 ## 快速开始
 
@@ -114,7 +125,7 @@ SECRET_KEY_FILE=/var/lib/relay-api/.secret-key ./relay-api
 │   │   └── stats.go         #   统计聚合与日志清理
 │   ├── httperr/             # 统一 JSON 错误响应
 │   ├── middleware/          # 管理员鉴权、API Key 鉴权、请求体限制、限流、请求日志
-│   ├── providers/           # 上游 provider 适配（OpenAI / Anthropic）
+│   ├── providers/           # 上游 provider 适配（Chat Completions / Anthropic / Responses）
 │   ├── router/              # 按模型名 + 优先级 + 故障转移选择上游
 │   ├── routes/              # HTTP 处理函数：网关、聊天、转发、隧道、后台资源、登录
 │   └── util/                # 密钥加密、登录挑战、SSE、SSRF 防护、路径模板、密码哈希等
