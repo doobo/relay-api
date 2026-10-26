@@ -2,8 +2,11 @@ package db
 
 import (
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"time"
+
+	"relay-api/internal/util"
 )
 
 // ------------------------------------------------------------------ helpers
@@ -65,7 +68,7 @@ func scanProvider(row interface{ Scan(...any) error }) (*ProviderRow, error) {
 
 // ListProviders returns all providers ordered by id.
 func ListProviders() ([]ProviderRow, error) {
-	rows, err := Get().Query(`SELECT ` + providerColumns + ` FROM providers ORDER BY id`)
+	rows, err := Read().Query(`SELECT ` + providerColumns + ` FROM providers ORDER BY id`)
 	if err != nil {
 		return nil, err
 	}
@@ -83,7 +86,7 @@ func ListProviders() ([]ProviderRow, error) {
 
 // GetProvider loads one provider (nil when missing).
 func GetProvider(id int64) (*ProviderRow, error) {
-	return scanProvider(Get().QueryRow(`SELECT `+providerColumns+` FROM providers WHERE id = ?`, id))
+	return scanProvider(Read().QueryRow(`SELECT `+providerColumns+` FROM providers WHERE id = ?`, id))
 }
 
 // CreateProvider inserts a provider. Headers is a JSON object of extra upstream
@@ -175,7 +178,7 @@ func DeleteProvider(id int64) (bool, error) {
 // ListModelNamesByProvider lists model aliases (from models and model_routes)
 // that still point at a provider, used to explain why it cannot be deleted.
 func ListModelNamesByProvider(providerID int64) ([]string, error) {
-	rows, err := Get().Query(
+	rows, err := Read().Query(
 		`SELECT name AS model_name FROM models WHERE provider_id = ?
 		 UNION
 		 SELECT model_name FROM model_routes WHERE provider_id = ?
@@ -229,7 +232,7 @@ func scanModel(row interface{ Scan(...any) error }) (*ModelRow, error) {
 
 // ListModels returns aliases ordered by priority then name.
 func ListModels() ([]ModelRow, error) {
-	rows, err := Get().Query(`SELECT ` + modelColumns + ` FROM models ORDER BY priority, name`)
+	rows, err := Read().Query(`SELECT ` + modelColumns + ` FROM models ORDER BY priority, name`)
 	if err != nil {
 		return nil, err
 	}
@@ -247,15 +250,15 @@ func ListModels() ([]ModelRow, error) {
 
 // GetModel loads one alias (nil when missing).
 func GetModel(id int64) (*ModelRow, error) {
-	return scanModel(Get().QueryRow(`SELECT `+modelColumns+` FROM models WHERE id = ?`, id))
+	return scanModel(Read().QueryRow(`SELECT `+modelColumns+` FROM models WHERE id = ?`, id))
 }
 
 // FindModelByName finds a duplicate alias, ignoring excludeID (0 = none).
 func FindModelByName(name string, excludeID int64) (*ModelRow, error) {
 	if excludeID > 0 {
-		return scanModel(Get().QueryRow(`SELECT `+modelColumns+` FROM models WHERE name = ? AND id != ?`, name, excludeID))
+		return scanModel(Read().QueryRow(`SELECT `+modelColumns+` FROM models WHERE name = ? AND id != ?`, name, excludeID))
 	}
-	return scanModel(Get().QueryRow(`SELECT `+modelColumns+` FROM models WHERE name = ?`, name))
+	return scanModel(Read().QueryRow(`SELECT `+modelColumns+` FROM models WHERE name = ?`, name))
 }
 
 // CreateModel inserts an alias.
@@ -352,6 +355,51 @@ type APIKeyRow struct {
 	ExpiresAt           *int64
 	CreatedAt           int64
 	LastUsedAt          *int64
+
+	// Parsed permission lists, filled when the row is scanned. They keep the
+	// auth/forward hot paths from decoding the same JSON arrays per request.
+	allowedModels []string
+	allowedAPIs   []string
+	allowedParsed bool
+}
+
+// AllowedModelList returns the key's model whitelist, parsed once when the row
+// was loaded (with an on-demand fallback for directly constructed rows).
+func (k APIKeyRow) AllowedModelList() []string {
+	if k.allowedParsed {
+		return k.allowedModels
+	}
+	return parseStringList(k.AllowedModels)
+}
+
+// AllowedAPIList returns the key's API-config whitelist.
+func (k APIKeyRow) AllowedAPIList() []string {
+	if k.allowedParsed {
+		return k.allowedAPIs
+	}
+	return parseStringList(k.AllowedAPIs)
+}
+
+// parseStringList decodes a stored JSON array of strings (nil when absent or
+// invalid).
+func parseStringList(raw *string) []string {
+	if raw == nil || *raw == "" {
+		return nil
+	}
+	var values []string
+	if err := json.Unmarshal([]byte(*raw), &values); err != nil {
+		return nil
+	}
+	return values
+}
+
+// HasQuotaLimits reports whether the key has any daily/weekly/monthly request
+// or token quota configured. Keys without one skip quota-counter maintenance
+// on the relay path.
+func (k APIKeyRow) HasQuotaLimits() bool {
+	return k.DailyRequestLimit > 0 || k.DailyTokenLimit > 0 ||
+		k.WeeklyRequestLimit > 0 || k.WeeklyTokenLimit > 0 ||
+		k.MonthlyRequestLimit > 0 || k.MonthlyTokenLimit > 0
 }
 
 const apiKeyColumns = `id, name, prefix, key_hash, scope, allowed_models, allowed_apis, rate_limit,
@@ -390,12 +438,15 @@ func scanAPIKey(row interface{ Scan(...any) error }) (*APIKeyRow, error) {
 		key.LastUsedAt = &lastUsed.Int64
 	}
 	key.Enabled = enabled != 0
+	key.allowedModels = parseStringList(key.AllowedModels)
+	key.allowedAPIs = parseStringList(key.AllowedAPIs)
+	key.allowedParsed = true
 	return &key, nil
 }
 
 // ListAPIKeys returns every key ordered by id.
 func ListAPIKeys() ([]APIKeyRow, error) {
-	rows, err := Get().Query(`SELECT ` + apiKeyColumns + ` FROM api_keys ORDER BY id`)
+	rows, err := Read().Query(`SELECT ` + apiKeyColumns + ` FROM api_keys ORDER BY id`)
 	if err != nil {
 		return nil, err
 	}
@@ -413,7 +464,7 @@ func ListAPIKeys() ([]APIKeyRow, error) {
 
 // GetAPIKey loads one key (nil when missing).
 func GetAPIKey(id int64) (*APIKeyRow, error) {
-	return scanAPIKey(Get().QueryRow(`SELECT `+apiKeyColumns+` FROM api_keys WHERE id = ?`, id))
+	return scanAPIKey(Read().QueryRow(`SELECT `+apiKeyColumns+` FROM api_keys WHERE id = ?`, id))
 }
 
 // NewAPIKey is the insert payload for an API key.
@@ -567,6 +618,13 @@ type APIConfigRow struct {
 	Enabled          bool
 	CreatedAt        int64
 	UpdatedAt        int64
+
+	// Compiled template forms, populated when the enabled-config cache loads.
+	// Nil means the raw field was absent/invalid (or this row came from a path
+	// that does not compile); the handlers fall back to parsing it per request.
+	ParsedHeaders          map[string]*util.Template `json:"-"`
+	ParsedRequestTemplate  *util.Template            `json:"-"`
+	ParsedResponseTemplate *util.Template            `json:"-"`
 }
 
 const apiConfigColumns = `id, name, description, method, url, headers, request_template, response_template,
@@ -618,7 +676,7 @@ func scanAPIConfig(row interface{ Scan(...any) error }) (*APIConfigRow, error) {
 
 // ListAPIConfigs returns every config ordered by name.
 func ListAPIConfigs() ([]APIConfigRow, error) {
-	rows, err := Get().Query(`SELECT ` + apiConfigColumns + ` FROM api_configs ORDER BY name`)
+	rows, err := Read().Query(`SELECT ` + apiConfigColumns + ` FROM api_configs ORDER BY name`)
 	if err != nil {
 		return nil, err
 	}
@@ -636,7 +694,7 @@ func ListAPIConfigs() ([]APIConfigRow, error) {
 
 // GetAPIConfig loads one config (nil when missing).
 func GetAPIConfig(id int64) (*APIConfigRow, error) {
-	return scanAPIConfig(Get().QueryRow(`SELECT `+apiConfigColumns+` FROM api_configs WHERE id = ?`, id))
+	return scanAPIConfig(Read().QueryRow(`SELECT `+apiConfigColumns+` FROM api_configs WHERE id = ?`, id))
 }
 
 // NewAPIConfig is the insert payload for a config.
@@ -777,7 +835,7 @@ type APIConfigStats struct {
 
 // APIConfigStatsAll aggregates usage_logs per config (kind = api).
 func APIConfigStatsAll() ([]APIConfigStats, error) {
-	rows, err := Get().Query(
+	rows, err := Read().Query(
 		`SELECT api_config_id, COUNT(*) AS requests,
 			COALESCE(SUM(CASE WHEN status >= 400 OR status IS NULL THEN 1 ELSE 0 END), 0) AS errors,
 			COALESCE(AVG(latency_ms), 0) AS avg_latency_ms

@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/url"
 	"sync"
 
 	"relay-api/internal/db"
@@ -217,12 +218,15 @@ func (r *Resolver) ProviderConfig(route Route, requestTimeoutMs int) (providers.
 
 // providerConfigUncached decodes headers and decrypts the stored API key.
 func (r *Resolver) providerConfigUncached(route Route, requestTimeoutMs int) (providers.Config, error) {
+	headers := parseProviderHeaders(route.Provider.Headers)
 	cfg := providers.Config{
 		ID:               route.Provider.ID,
 		Name:             route.Provider.Name,
 		Type:             route.Provider.Type,
 		BaseURL:          route.Provider.BaseURL,
-		Headers:          parseProviderHeaders(route.Provider.Headers),
+		BaseURLParsed:    parseProviderBaseURL(route.Provider.BaseURL),
+		Headers:          headers,
+		HeaderTemplates:  providers.CompileHeaders(headers),
 		RequestTimeoutMs: requestTimeoutMs,
 	}
 	if route.Provider.APIKey != nil && *route.Provider.APIKey != "" {
@@ -236,6 +240,17 @@ func (r *Resolver) providerConfigUncached(route Route, requestTimeoutMs int) (pr
 		cfg.APIKey = &plaintext
 	}
 	return cfg, nil
+}
+
+// parseProviderBaseURL parses the base URL once when the provider config is
+// cached. A parse error leaves it nil so the provider falls back to the string
+// path and reports the same error as before on use.
+func parseProviderBaseURL(raw string) *url.URL {
+	parsed, err := url.Parse(raw)
+	if err != nil {
+		return nil
+	}
+	return parsed
 }
 
 // parseProviderHeaders decodes the stored custom-header JSON object.

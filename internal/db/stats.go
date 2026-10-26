@@ -111,7 +111,7 @@ func scanUsageLog(row interface{ Scan(...any) error }) (*UsageLogRow, error) {
 
 // GetUsageLog loads one usage row (nil when missing).
 func GetUsageLog(id int64) (*UsageLogRow, error) {
-	return scanUsageLog(Get().QueryRow(`SELECT `+usageLogColumns+` FROM usage_logs WHERE id = ?`, id))
+	return scanUsageLog(Read().QueryRow(`SELECT `+usageLogColumns+` FROM usage_logs WHERE id = ?`, id))
 }
 
 // ListUsageLogs returns usage rows newest-first, honoring the given filters.
@@ -159,7 +159,7 @@ func ListUsageLogs(filters UsageFilters) ([]UsageLogRow, error) {
 	}
 	params = append(params, limit, offset)
 
-	rows, err := Get().Query(
+	rows, err := Read().Query(
 		`SELECT `+usageLogColumns+` FROM usage_logs `+where+` ORDER BY created_at DESC, id DESC LIMIT ? OFFSET ?`,
 		params...,
 	)
@@ -192,7 +192,7 @@ type TodayStats struct {
 // the current day.
 func TodayStatsSince() (TodayStats, error) {
 	var stats TodayStats
-	err := Get().QueryRow(
+	err := Read().QueryRow(
 		`SELECT
 			COUNT(*) AS requests,
 			COALESCE(SUM(total_tokens), 0) AS tokens,
@@ -214,7 +214,7 @@ type ModelStat struct {
 
 // ModelStatsToday returns today's per-model counters, busiest first.
 func ModelStatsToday() ([]ModelStat, error) {
-	rows, err := Get().Query(
+	rows, err := Read().Query(
 		`SELECT model, COUNT(*) AS requests, COALESCE(SUM(total_tokens), 0) AS tokens
 		 FROM usage_logs
 		 WHERE kind = 'ai' AND model IS NOT NULL AND created_at >= ?
@@ -247,7 +247,7 @@ type ProviderStat struct {
 
 // ProviderStatsToday returns today's per-provider counters, busiest first.
 func ProviderStatsToday() ([]ProviderStat, error) {
-	rows, err := Get().Query(
+	rows, err := Read().Query(
 		`SELECT provider, COUNT(*) AS requests,
 			COALESCE(SUM(CASE WHEN status >= 400 OR status IS NULL THEN 1 ELSE 0 END), 0) AS errors
 		 FROM usage_logs
@@ -275,7 +275,7 @@ func ProviderStatsToday() ([]ProviderStat, error) {
 // APIConfigStatsFor aggregates one config's all-time request counters.
 func APIConfigStatsFor(configID int64) (APIConfigStats, error) {
 	var stats APIConfigStats
-	err := Get().QueryRow(
+	err := Read().QueryRow(
 		`SELECT COUNT(*) AS requests,
 			COALESCE(SUM(CASE WHEN status >= 400 OR status IS NULL THEN 1 ELSE 0 END), 0) AS errors,
 			COALESCE(AVG(latency_ms), 0) AS avg_latency_ms
@@ -303,7 +303,7 @@ func ListAuditLogs(limit int) ([]AuditLogRow, error) {
 	if limit <= 0 {
 		limit = 100
 	}
-	rows, err := Get().Query(
+	rows, err := Read().Query(
 		`SELECT id, action, target, source_ip, created_at
 		 FROM audit_logs ORDER BY created_at DESC, id DESC LIMIT ?`,
 		limit,

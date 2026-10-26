@@ -44,17 +44,28 @@ func (g *Gateway) responses(w http.ResponseWriter, r *http.Request) {
 	requestID := middleware.RequestID(r.Context())
 	startedAt := time.Now()
 
-	rawBody := middleware.ParsedJSON(r.Context())
-	if rawBody == nil {
+	summary, ok := middleware.RequestSummaryFrom(r.Context())
+	if !ok {
 		invalidRequest(w, "Invalid JSON body")
 		return
 	}
-	model, _ := rawBody["model"].(string)
+	model := summary.Model
 	if model == "" {
 		invalidRequest(w, "model is required")
 		return
 	}
-	stream, _ := rawBody["stream"].(bool)
+	stream := summary.Stream
+
+	// The full object is only decoded when a route needs translation or when
+	// the response body has to echo client fields. A native `responses` route
+	// forwards RawBytes and never pays for the map.
+	var rawBody map[string]any
+	loadRawBody := func() map[string]any {
+		if rawBody == nil {
+			rawBody = middleware.ParsedJSON(r.Context())
+		}
+		return rawBody
+	}
 
 	// Conversion to chat is lazy: a route served by a `responses` provider
 	// forwards the original body untouched and never pays for the translation.
@@ -67,7 +78,7 @@ func (g *Gateway) responses(w http.ResponseWriter, r *http.Request) {
 		if converted {
 			return chatBody, customTools, nil
 		}
-		body, custom, err := responsesToChatRequest(rawBody)
+		body, custom, err := responsesToChatRequest(loadRawBody())
 		if err != nil {
 			return nil, nil, err
 		}
@@ -133,8 +144,10 @@ func (g *Gateway) responses(w http.ResponseWriter, r *http.Request) {
 			passCtx, cancelPass := context.WithCancel(r.Context())
 			request := baseRequest
 			request.Model = route.UpstreamModel
-			request.RawBody = rawBody
 			request.RawBytes = middleware.RequestBody(r.Context())
+			if len(request.RawBytes) == 0 {
+				request.RawBody = loadRawBody()
+			}
 			request.ClientHeaders = clientHeaders
 			upstream, err := providers.ResponsesPassthrough(passCtx, providerCfg, request)
 			if err != nil {
@@ -885,7 +898,9 @@ func (g *Gateway) writeResponsesStream(
 
 	status := http.StatusOK
 	failureMessage := ""
-	buffer := make([]byte, 32*1024)
+	bufferPtr := util.GetStreamBuffer()
+	defer util.PutStreamBuffer(bufferPtr)
+	buffer := *bufferPtr
 readLoop:
 	for {
 		n, readErr := upstream.Body.Read(buffer)
@@ -1132,7 +1147,9 @@ func (g *Gateway) writeResponsesPassthrough(w http.ResponseWriter, r *http.Reque
 
 	status := upstream.StatusCode
 	var failure *string
-	buffer := make([]byte, 32*1024)
+	bufferPtr := util.GetStreamBuffer()
+	defer util.PutStreamBuffer(bufferPtr)
+	buffer := *bufferPtr
 	for {
 		n, readErr := upstream.Body.Read(buffer)
 		if n > 0 {

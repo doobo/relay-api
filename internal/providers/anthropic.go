@@ -19,10 +19,6 @@ type Anthropic struct {
 	OpenAI
 }
 
-func (p *Anthropic) endpoint(path string) string {
-	return strings.TrimRight(p.cfg.BaseURL, "/") + path
-}
-
 func (p *Anthropic) headers(request Request) map[string]string {
 	headers := map[string]string{
 		"content-type":      "application/json",
@@ -155,11 +151,13 @@ func (p *Anthropic) Chat(ctx context.Context, request Request) (*Result, error) 
 	if err != nil {
 		return nil, err
 	}
-	response, err := util.FetchUpstream(ctx, p.endpoint("/messages"), util.FetchOptions{
+	rawURL, targetURL := p.cfg.endpoint("/messages")
+	response, err := util.FetchUpstream(ctx, rawURL, util.FetchOptions{
 		Method:    http.MethodPost,
 		Headers:   p.headers(request),
 		Body:      bytes.NewReader(payload),
 		TimeoutMs: p.cfg.RequestTimeoutMs,
+		URL:       targetURL,
 	})
 	if err != nil {
 		return nil, err
@@ -214,11 +212,13 @@ func (p *Anthropic) ChatStream(ctx context.Context, request Request) (*http.Resp
 	if err != nil {
 		return nil, err
 	}
-	upstream, err := util.FetchUpstream(ctx, p.endpoint("/messages"), util.FetchOptions{
+	rawURL, targetURL := p.cfg.endpoint("/messages")
+	upstream, err := util.FetchUpstream(ctx, rawURL, util.FetchOptions{
 		Method:    http.MethodPost,
 		Headers:   p.headers(request),
 		Body:      bytes.NewReader(payload),
 		TimeoutMs: 0,
+		URL:       targetURL,
 	})
 	if err != nil {
 		return nil, err
@@ -291,7 +291,9 @@ func (p *Anthropic) ChatStream(ctx context.Context, request Request) (*http.Resp
 			}
 		})
 
-		buffer := make([]byte, 32*1024)
+		bufferPtr := util.GetStreamBuffer()
+		defer util.PutStreamBuffer(bufferPtr)
+		buffer := *bufferPtr
 		for {
 			n, err := upstream.Body.Read(buffer)
 			if n > 0 {

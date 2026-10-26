@@ -1,6 +1,7 @@
 package util
 
 import (
+	"bytes"
 	"context"
 	"crypto/tls"
 	"errors"
@@ -8,6 +9,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"strings"
 	"sync"
@@ -114,6 +116,11 @@ type FetchOptions struct {
 	Headers   map[string]string
 	Body      io.Reader
 	TimeoutMs int
+	// URL, when set, is used directly instead of parsing rawURL. Callers that
+	// already hold a parsed URL (a cached provider base, or a validated config
+	// target) skip url.Parse on every request. The value is copied, so callers
+	// may reuse theirs.
+	URL *url.URL
 }
 
 // FetchUpstream performs an upstream request. timeoutMs <= 0 disables the
@@ -159,14 +166,72 @@ func (c *cancelOnClose) Close() error {
 }
 
 func do(ctx context.Context, rawURL string, opts FetchOptions) (*http.Response, error) {
-	request, err := http.NewRequestWithContext(ctx, opts.Method, rawURL, opts.Body)
-	if err != nil {
-		return nil, err
+	var (
+		request *http.Request
+		err     error
+	)
+	if opts.URL != nil {
+		request = newRequestWithURL(ctx, opts.Method, opts.URL, opts.Body)
+	} else {
+		request, err = http.NewRequestWithContext(ctx, opts.Method, rawURL, opts.Body)
+		if err != nil {
+			return nil, err
+		}
 	}
 	for key, value := range opts.Headers {
 		request.Header.Set(key, value)
 	}
 	return httpClient.Do(request)
+}
+
+// newRequestWithURL builds a client request around an already-parsed URL. It is
+// the fast path for the relay: net/http's NewRequest would parse the URL string
+// again, and that parse is otherwise paid on every forwarded request. Body
+// length and replay handling mirror NewRequest for the reader types the relay
+// uses.
+func newRequestWithURL(ctx context.Context, method string, target *url.URL, body io.Reader) *http.Request {
+	u := *target
+	request := &http.Request{
+		Method:     method,
+		URL:        &u,
+		Proto:      "HTTP/1.1",
+		ProtoMajor: 1,
+		ProtoMinor: 1,
+		Header:     make(http.Header),
+		Host:       u.Host,
+		Body:       http.NoBody,
+	}
+	if body != nil {
+		switch typed := body.(type) {
+		case *bytes.Buffer:
+			request.ContentLength = int64(typed.Len())
+			request.Body = io.NopCloser(typed)
+			request.GetBody = func() (io.ReadCloser, error) {
+				return io.NopCloser(bytes.NewReader(typed.Bytes())), nil
+			}
+		case *bytes.Reader:
+			request.ContentLength = int64(typed.Len())
+			request.Body = io.NopCloser(typed)
+			snapshot := *typed
+			request.GetBody = func() (io.ReadCloser, error) {
+				clone := snapshot
+				return io.NopCloser(&clone), nil
+			}
+		case *strings.Reader:
+			request.ContentLength = int64(typed.Len())
+			request.Body = io.NopCloser(typed)
+			snapshot := *typed
+			request.GetBody = func() (io.ReadCloser, error) {
+				clone := snapshot
+				return io.NopCloser(&clone), nil
+			}
+		case io.ReadCloser:
+			request.Body = typed
+		default:
+			request.Body = io.NopCloser(typed)
+		}
+	}
+	return request.WithContext(ctx)
 }
 
 // requestHeaderBlocklist are hop-by-hop / auth / browser-state headers that are

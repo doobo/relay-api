@@ -33,24 +33,23 @@ func (g *Gateway) chat(w http.ResponseWriter, r *http.Request) {
 	requestID := middleware.RequestID(r.Context())
 	startedAt := time.Now()
 
-	rawBody := middleware.ParsedJSON(r.Context())
-	if rawBody == nil {
+	summary, ok := middleware.RequestSummaryFrom(r.Context())
+	if !ok {
 		invalidRequest(w, "Invalid JSON body")
 		return
 	}
-	model, _ := rawBody["model"].(string)
+	model := summary.Model
 	if model == "" {
 		invalidRequest(w, "model is required")
 		return
 	}
-	messages, _ := rawBody["messages"].([]any)
-	if len(messages) == 0 {
+	if !summary.HasMessages {
 		invalidRequest(w, "messages is required and must be a non-empty array")
 		return
 	}
-	stream, _ := rawBody["stream"].(bool)
-	temperature := float64Value(rawBody["temperature"])
-	maxTokens := intValue(rawBody["max_tokens"])
+	stream := summary.Stream
+	temperature := summary.Temperature
+	maxTokens := summary.MaxTokens
 
 	routes, err := g.resolver.Resolve(model)
 	if err != nil {
@@ -78,14 +77,16 @@ func (g *Gateway) chat(w http.ResponseWriter, r *http.Request) {
 	var upstreamHeaders map[string]string
 
 	providerRequest := providers.Request{
-		Model:       routes[0].UpstreamModel,
-		Stream:      stream,
-		Temperature: temperature,
-		MaxTokens:   maxTokens,
-		RawBody:     rawBody,
-		RawBytes:    middleware.RequestBody(r.Context()),
-		RawResponse: !stream,
-		Session:     middleware.AISessionFrom(r.Context()),
+		Model:             routes[0].UpstreamModel,
+		Stream:            stream,
+		Temperature:       temperature,
+		MaxTokens:         maxTokens,
+		RawBytes:          middleware.RequestBody(r.Context()),
+		RawResponse:       !stream,
+		Session:           middleware.AISessionFrom(r.Context()),
+		ClientModel:       model,
+		ClientStream:      stream,
+		ClientStreamKnown: summary.StreamKnown,
 		OnUpstreamHeaders: func(headers map[string]string) {
 			upstreamHeaders = headers
 		},
@@ -103,6 +104,13 @@ func (g *Gateway) chat(w http.ResponseWriter, r *http.Request) {
 		provider := providers.New(providerCfg)
 		request := providerRequest
 		request.Model = route.UpstreamModel
+		if providerNeedsFullBody(providerCfg.Type) {
+			request.RawBody = middleware.ParsedJSON(r.Context())
+			if request.RawBody == nil {
+				invalidRequest(w, "Invalid JSON body")
+				return
+			}
+		}
 		if len(providerCfg.Headers) > 0 {
 			if clientHeaders == nil {
 				clientHeaders = clientHeaderMap(r.Header)
@@ -306,7 +314,9 @@ func (g *Gateway) writeStream(w http.ResponseWriter, r *http.Request, upstream *
 	defer timer.Stop()
 
 	status := http.StatusOK
-	buffer := make([]byte, 32*1024)
+	bufferPtr := util.GetStreamBuffer()
+	defer util.PutStreamBuffer(bufferPtr)
+	buffer := *bufferPtr
 readLoop:
 	for {
 		n, readErr := upstream.Body.Read(buffer)
@@ -398,17 +408,14 @@ func clientHeaderMap(header http.Header) map[string]string {
 	return out
 }
 
-func float64Value(value any) *float64 {
-	if number, ok := value.(float64); ok {
-		return &number
+// providerNeedsFullBody reports whether an adapter reads the decoded request
+// object. OpenAI/compatible providers forward the raw bytes and only need the
+// summary; Anthropic and Responses translate the message tree and need the map.
+func providerNeedsFullBody(kind string) bool {
+	switch kind {
+	case "anthropic", "openai-responses", "responses":
+		return true
+	default:
+		return false
 	}
-	return nil
-}
-
-func intValue(value any) *int {
-	if number, ok := value.(float64); ok {
-		converted := int(number)
-		return &converted
-	}
-	return nil
 }

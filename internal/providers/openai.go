@@ -6,7 +6,6 @@ import (
 	"encoding/json"
 	"io"
 	"net/http"
-	"strings"
 
 	"relay-api/internal/util"
 )
@@ -15,10 +14,6 @@ import (
 // (DeepSeek, Qwen, vLLM, Ollama, ...) reuse it unchanged.
 type OpenAI struct {
 	cfg Config
-}
-
-func (p *OpenAI) endpoint(path string) string {
-	return strings.TrimRight(p.cfg.BaseURL, "/") + path
 }
 
 func (p *OpenAI) headers(request Request) map[string]string {
@@ -44,6 +39,13 @@ func (p *OpenAI) buildBody(request Request, stream bool) map[string]any {
 // falling back to a map round-trip for callers that pass only RawBody.
 func (p *OpenAI) payload(request Request, stream bool) ([]byte, error) {
 	if len(request.RawBytes) > 0 {
+		// The alias usually resolves to the same upstream model name and the
+		// client already sent the right stream flag. In that case the raw bytes
+		// are already exactly what upstream should receive: skip the full JSON
+		// scan/rewrite entirely.
+		if request.clientModel() == request.Model && request.clientStreamMatches(stream) {
+			return request.RawBytes, nil
+		}
 		modelValue, err := json.Marshal(request.Model)
 		if err != nil {
 			return nil, err
@@ -58,8 +60,46 @@ func (p *OpenAI) payload(request Request, stream bool) ([]byte, error) {
 		}); err == nil {
 			return rewritten, nil
 		}
+		// The rewrite should not fail for a body the handler accepted, but if
+		// it does, decode the raw bytes so no client field is dropped.
+		if request.RawBody == nil {
+			var parsed map[string]any
+			if json.Unmarshal(request.RawBytes, &parsed) == nil {
+				request.RawBody = parsed
+			}
+		}
 	}
 	return json.Marshal(p.buildBody(request, stream))
+}
+
+// clientModel returns the model from the raw client body. ClientModel is the
+// fast path; RawBody keeps callers that only set the decoded map working.
+func (request Request) clientModel() string {
+	if request.ClientModel != "" {
+		return request.ClientModel
+	}
+	if request.RawBody == nil {
+		return ""
+	}
+	value, _ := request.RawBody["model"].(string)
+	return value
+}
+
+// clientStreamMatches reports whether the client body already carries the
+// requested stream flag. An absent flag means false.
+func (request Request) clientStreamMatches(stream bool) bool {
+	if request.ClientStreamKnown {
+		return request.ClientStream == stream
+	}
+	if request.RawBody == nil {
+		return false
+	}
+	value, present := request.RawBody["stream"]
+	if !present {
+		return !stream
+	}
+	flag, ok := value.(bool)
+	return ok && flag == stream
 }
 
 // Chat performs a non-streaming completion.
@@ -68,11 +108,13 @@ func (p *OpenAI) Chat(ctx context.Context, request Request) (*Result, error) {
 	if err != nil {
 		return nil, err
 	}
-	response, err := util.FetchUpstream(ctx, p.endpoint("/chat/completions"), util.FetchOptions{
+	rawURL, targetURL := p.cfg.endpoint("/chat/completions")
+	response, err := util.FetchUpstream(ctx, rawURL, util.FetchOptions{
 		Method:    http.MethodPost,
 		Headers:   p.headers(request),
 		Body:      bytes.NewReader(payload),
 		TimeoutMs: p.cfg.RequestTimeoutMs,
+		URL:       targetURL,
 	})
 	if err != nil {
 		return nil, err
@@ -147,12 +189,14 @@ func (p *OpenAI) ChatStream(ctx context.Context, request Request) (*http.Respons
 	if err != nil {
 		return nil, err
 	}
-	response, err := util.FetchUpstream(ctx, p.endpoint("/chat/completions"), util.FetchOptions{
+	rawURL, targetURL := p.cfg.endpoint("/chat/completions")
+	response, err := util.FetchUpstream(ctx, rawURL, util.FetchOptions{
 		Method:  http.MethodPost,
 		Headers: p.headers(request),
 		Body:    bytes.NewReader(payload),
 		// No overall timeout for streams; the caller enforces an idle timeout.
 		TimeoutMs: 0,
+		URL:       targetURL,
 	})
 	if err != nil {
 		return nil, err

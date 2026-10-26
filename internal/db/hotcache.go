@@ -75,6 +75,34 @@ var (
 	quotaCounters = make(map[int64]*quotaCounter)
 )
 
+// quotaTrackedKeys records whether a key has any quota limits configured. It is
+// populated when the key row is loaded (a key-cache miss), so the relay path can
+// skip the quota maps entirely for keys that are not quota-limited. A missing
+// entry means "unknown" and is treated as tracked, preserving the behaviour for
+// callers that record usage without going through API-key auth.
+var quotaTrackedKeys sync.Map // map[int64]bool
+
+// rememberQuotaTracking records whether a key needs quota-counter maintenance.
+// When the setting flips (for example an admin adds a quota to a key that had
+// none), the in-memory counter is dropped so the next check reloads the real
+// totals from SQLite instead of undercounting usage recorded while disabled.
+func rememberQuotaTracking(key APIKeyRow) {
+	tracked := key.HasQuotaLimits()
+	previous, known := quotaTrackedKeys.Swap(key.ID, tracked)
+	if known && previous.(bool) != tracked {
+		forgetQuotaCounter(key.ID)
+	}
+}
+
+// clearQuotaTracking drops the hints after the database handle changes; they
+// are repopulated the next time each key is loaded.
+func clearQuotaTracking() {
+	quotaTrackedKeys.Range(func(key, _ any) bool {
+		quotaTrackedKeys.Delete(key)
+		return true
+	})
+}
+
 func quotaEntry(keyID int64) *quotaCounter {
 	quotaMu.RLock()
 	counter := quotaCounters[keyID]
@@ -102,6 +130,12 @@ func forgetQuotaCounter(keyID int64) {
 // quota enforcement does not wait for the batch writer.
 func addAPIKeyQuotaUsage(keyID int64, tokens int) {
 	if keyID <= 0 {
+		return
+	}
+	// Most keys have no quota configured; skip the counter bookkeeping (and its
+	// per-key lock) for them. An unknown key is treated as tracked so direct
+	// recording callers and tests keep the old behaviour.
+	if tracked, known := quotaTrackedKeys.Load(keyID); known && !tracked.(bool) {
 		return
 	}
 	counter := quotaEntry(keyID)
@@ -188,6 +222,7 @@ func APIKeyQuotaUsageCached(keyID int64) (QuotaUsage, error) {
 func resetHotCaches() {
 	aiResourceGeneration.Add(1)
 	invalidateAPIKeyCache()
+	clearQuotaTracking()
 	quotaMu.Lock()
 	quotaCounters = make(map[int64]*quotaCounter)
 	quotaMu.Unlock()

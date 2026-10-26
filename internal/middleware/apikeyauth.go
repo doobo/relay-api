@@ -2,9 +2,9 @@ package middleware
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 
@@ -73,16 +73,24 @@ func APIKeyAuth(limiter *RateLimiter) func(http.Handler) http.Handler {
 				return
 			}
 
-			// Model permission: NULL or empty array = no restriction.
-			allowedModels := parseJSONStringArray(keyRow.AllowedModels)
-			body := ParsedJSON(r.Context())
-			model, _ := body["model"].(string)
-			if model != "" && len(allowedModels) > 0 && !containsString(allowedModels, model) {
-				httperr.Write(w, http.StatusForbidden, "Model '"+model+"' is not allowed for this API key", "permission_error", "model_not_allowed")
-				return
+			// Model permission: NULL or empty array = no restriction. Only
+			// read/decode the body when the key actually restricts models.
+			allowedModels := keyRow.AllowedModelList()
+			if len(allowedModels) > 0 {
+				model := ""
+				if summary, ok := RequestSummaryFrom(r.Context()); ok {
+					model = summary.Model
+				}
+				if model != "" && !containsString(allowedModels, model) {
+					httperr.Write(w, http.StatusForbidden, "Model '"+model+"' is not allowed for this API key", "permission_error", "model_not_allowed")
+					return
+				}
 			}
 
-			if _, allowed := limiter.Check(fmt.Sprintf("key:%d", keyRow.ID), keyRow.RateLimit); !allowed {
+			var rateKeyBuffer [24]byte
+			rateKey := append(rateKeyBuffer[:0], "key:"...)
+			rateKey = strconv.AppendInt(rateKey, keyRow.ID, 10)
+			if _, allowed := limiter.Check(string(rateKey), keyRow.RateLimit); !allowed {
 				httperr.Write(w, http.StatusTooManyRequests, "Rate limit exceeded", "rate_limit_error", "rate_limit_exceeded")
 				return
 			}
@@ -101,9 +109,7 @@ func APIKeyAuth(limiter *RateLimiter) func(http.Handler) http.Handler {
 // enforceQuotas checks the key's day/week/month request and token quotas. A
 // limit of 0 is unlimited.
 func enforceQuotas(key db.APIKeyRow) (string, bool) {
-	if key.DailyRequestLimit <= 0 && key.DailyTokenLimit <= 0 &&
-		key.WeeklyRequestLimit <= 0 && key.WeeklyTokenLimit <= 0 &&
-		key.MonthlyRequestLimit <= 0 && key.MonthlyTokenLimit <= 0 {
+	if !key.HasQuotaLimits() {
 		return "", false
 	}
 	usage, err := db.APIKeyQuotaUsageCached(key.ID)
@@ -134,17 +140,6 @@ func enforceQuotas(key db.APIKeyRow) (string, bool) {
 
 func unauthorizedKey(w http.ResponseWriter, message string) {
 	httperr.Write(w, http.StatusUnauthorized, message, "authentication_error", "unauthorized")
-}
-
-func parseJSONStringArray(raw *string) []string {
-	if raw == nil || *raw == "" {
-		return nil
-	}
-	var values []string
-	if err := json.Unmarshal([]byte(*raw), &values); err != nil {
-		return nil
-	}
-	return values
 }
 
 func containsString(values []string, target string) bool {

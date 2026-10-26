@@ -58,7 +58,7 @@ func (h *ForwardRoutes) handle(w http.ResponseWriter, r *http.Request) {
 
 	// API-config permission (allowed_apis); empty = unrestricted.
 	if auth != nil {
-		allowed := parseStrings(auth.Key.AllowedAPIs)
+		allowed := auth.Key.AllowedAPIList()
 		if len(allowed) > 0 && !containsString(allowed, apiConfig.Name) {
 			httperr.Write(w, http.StatusForbidden, "API config '"+apiConfig.Name+"' is not allowed for this API key", "permission_error", "config_not_allowed")
 			return
@@ -98,9 +98,10 @@ func (h *ForwardRoutes) handle(w http.ResponseWriter, r *http.Request) {
 	method := util.ResolveUpstreamMethod(apiConfig.Method, clientMethod)
 
 	rawBody := middleware.RequestBody(r.Context())
-	configHeaders := parseStringMap(apiConfig.Headers)
-	requestTemplate := parseJSONValue(apiConfig.RequestTemplate)
-	needsTemplateContext := requestTemplate != nil || hasTemplatePlaceholder(configHeaders)
+	headerTemplates := configHeaderTemplates(apiConfig)
+	requestTemplate := configRequestTemplate(apiConfig)
+	needsTemplateContext := headerTemplatesDynamic(headerTemplates) ||
+		(requestTemplate != nil && requestTemplate.Dynamic())
 
 	// The template context is only built when a template actually references
 	// it. A plain passthrough request skips the JSON parse and the header/query
@@ -117,7 +118,7 @@ func (h *ForwardRoutes) handle(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 		// Template contexts are plain map[string]any so {{headers.x}} /
-		// {{query.x}} lookups work (templateLookup only descends into
+		// {{query.x}} lookups work (lookupPath only descends into
 		// JSON-shaped maps).
 		headersContext := map[string]any{}
 		for key, values := range r.Header {
@@ -134,12 +135,11 @@ func (h *ForwardRoutes) handle(w http.ResponseWriter, r *http.Request) {
 		templateContext = map[string]any{"body": clientBody, "headers": headersContext, "query": queryContext}
 	}
 
-	renderedConfigHeaders := map[string]string{}
-	for key, value := range configHeaders {
-		if strings.Contains(value, "{{") {
-			renderedConfigHeaders[key] = asString(util.RenderTemplate(value, templateContext))
-		} else {
-			renderedConfigHeaders[key] = value
+	var renderedConfigHeaders map[string]string
+	if len(headerTemplates) > 0 {
+		renderedConfigHeaders = make(map[string]string, len(headerTemplates))
+		for key, template := range headerTemplates {
+			renderedConfigHeaders[key] = asString(template.Render(templateContext))
 		}
 	}
 	upstreamHeaders = util.ForwardedRequestHeaders(r.Header)
@@ -173,8 +173,8 @@ func (h *ForwardRoutes) handle(w http.ResponseWriter, r *http.Request) {
 
 	var requestBody io.Reader
 	if requestTemplate != nil {
-		upstreamBody := util.RenderTemplate(requestTemplate, templateContext)
-		if unresolved := util.FindUnresolved(requestTemplate, templateContext); len(unresolved) > 0 {
+		upstreamBody, unresolved := requestTemplate.RenderAndFindUnresolved(templateContext)
+		if len(unresolved) > 0 {
 			message := "Request template has unresolved placeholders: " + strings.Join(unresolved, ", ")
 			invalidRequest(w, message)
 			record(http.StatusBadRequest, &message)
@@ -200,11 +200,12 @@ func (h *ForwardRoutes) handle(w http.ResponseWriter, r *http.Request) {
 		timeoutMs = h.cfg.RequestTimeoutMs
 	}
 
-	response, err := util.FetchUpstream(r.Context(), parsedURL.String(), util.FetchOptions{
+	response, err := util.FetchUpstream(r.Context(), "", util.FetchOptions{
 		Method:    method,
 		Headers:   upstreamHeaders,
 		Body:      requestBody,
 		TimeoutMs: timeoutMs,
+		URL:       parsedURL,
 	})
 	if err != nil {
 		message := err.Error()
@@ -219,7 +220,7 @@ func (h *ForwardRoutes) handle(w http.ResponseWriter, r *http.Request) {
 	}
 	defer response.Body.Close()
 
-	responseTemplate := parseJSONValue(apiConfig.ResponseTemplate)
+	responseTemplate := configResponseTemplate(apiConfig)
 	if responseTemplate != nil && response.StatusCode < 300 {
 		data, err := io.ReadAll(response.Body)
 		if err != nil {
@@ -235,8 +236,8 @@ func (h *ForwardRoutes) handle(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		bodyContext := map[string]any{"data": upstreamJSON}
-		rendered := util.RenderTemplate(responseTemplate, bodyContext)
-		if unresolved := util.FindUnresolved(responseTemplate, bodyContext); len(unresolved) > 0 {
+		rendered, unresolved := responseTemplate.RenderAndFindUnresolved(bodyContext)
+		if len(unresolved) > 0 {
 			message := "Response template has unresolved placeholders: " + strings.Join(unresolved, ", ")
 			httperr.Write(w, http.StatusBadGateway, message, "upstream_error", "upstream_error")
 			record(http.StatusBadGateway, &message)
@@ -281,11 +282,54 @@ func requestBodyReader(value any) (io.Reader, error) {
 	return bytes.NewReader(encoded), nil
 }
 
-// hasTemplatePlaceholder reports whether any configured header value needs the
-// template engine.
-func hasTemplatePlaceholder(values map[string]string) bool {
-	for _, value := range values {
-		if strings.Contains(value, "{{") {
+// configHeaderTemplates returns the config's pre-compiled header templates,
+// falling back to a per-request compile for rows that did not come through the
+// enabled-config cache.
+func configHeaderTemplates(config *db.APIConfigRow) map[string]*util.Template {
+	if config.ParsedHeaders != nil {
+		return config.ParsedHeaders
+	}
+	headers := parseStringMap(config.Headers)
+	if len(headers) == 0 {
+		return nil
+	}
+	templates := make(map[string]*util.Template, len(headers))
+	for key, value := range headers {
+		templates[key] = util.ParseTemplate(value)
+	}
+	return templates
+}
+
+// configRequestTemplate returns the compiled request template, or nil when the
+// config has none.
+func configRequestTemplate(config *db.APIConfigRow) *util.Template {
+	if config.ParsedRequestTemplate != nil {
+		return config.ParsedRequestTemplate
+	}
+	value := parseJSONValue(config.RequestTemplate)
+	if value == nil {
+		return nil
+	}
+	return util.ParseTemplate(value)
+}
+
+// configResponseTemplate returns the compiled response template, or nil when
+// the config has none.
+func configResponseTemplate(config *db.APIConfigRow) *util.Template {
+	if config.ParsedResponseTemplate != nil {
+		return config.ParsedResponseTemplate
+	}
+	value := parseJSONValue(config.ResponseTemplate)
+	if value == nil {
+		return nil
+	}
+	return util.ParseTemplate(value)
+}
+
+// headerTemplatesDynamic reports whether any header needs the template context.
+func headerTemplatesDynamic(templates map[string]*util.Template) bool {
+	for _, template := range templates {
+		if template.Dynamic() {
 			return true
 		}
 	}

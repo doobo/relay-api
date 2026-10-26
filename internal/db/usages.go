@@ -139,40 +139,36 @@ type usageMessage struct {
 
 type usageWriter struct {
 	queue   chan usageMessage
+	stop    chan struct{}
 	stopped chan struct{}
-	closed  bool // guarded by usageMu
 }
 
-var (
-	usageMu     sync.Mutex
-	usageActive *usageWriter
-)
+// usageActive is read on every request. Storing it in an atomic pointer keeps
+// the relay path free of the global mutex that used to guard it; only startup
+// and shutdown (which are serialised by the database handle) swap it.
+var usageActive atomic.Pointer[usageWriter]
 
 // startUsageWriter begins the background batch writer; stopUsageWriter drains
 // and halts it. They bracket the database handle's lifetime (Open/Close).
 func startUsageWriter() {
 	writer := &usageWriter{
 		queue:   make(chan usageMessage, usageQueueSize),
+		stop:    make(chan struct{}),
 		stopped: make(chan struct{}),
 	}
-	usageMu.Lock()
-	usageActive = writer
-	usageMu.Unlock()
+	if previous := usageActive.Swap(writer); previous != nil {
+		close(previous.stop)
+		<-previous.stopped
+	}
 	go writer.run()
 }
 
 func stopUsageWriter() {
-	usageMu.Lock()
-	writer := usageActive
-	usageActive = nil
-	if writer != nil {
-		writer.closed = true
-	}
-	usageMu.Unlock()
+	writer := usageActive.Swap(nil)
 	if writer == nil {
 		return
 	}
-	close(writer.queue)
+	close(writer.stop)
 	<-writer.stopped
 }
 
@@ -182,20 +178,16 @@ func stopUsageWriter() {
 // single SQLite connection.
 func RecordUsageAsync(record UsageRecord) {
 	noteUsage(record)
-	usageMu.Lock()
-	writer := usageActive
+	writer := usageActive.Load()
 	if writer == nil {
-		usageMu.Unlock()
 		_ = insertUsage(record)
 		return
 	}
-	// Send while holding the lock so stopUsageWriter cannot close the queue
-	// between the nil check and the send.
+	// The queue is never closed, so a concurrent stop cannot make this send
+	// panic; the writer drains what is already queued before it exits.
 	select {
 	case writer.queue <- usageMessage{record: record}:
-		usageMu.Unlock()
 	default:
-		usageMu.Unlock()
 		noteDroppedUsage()
 	}
 }
@@ -203,31 +195,31 @@ func RecordUsageAsync(record UsageRecord) {
 // FlushUsage blocks until every record queued before the call has been written,
 // so callers (graceful shutdown, tests) can observe them.
 func FlushUsage(ctx context.Context) error {
-	usageMu.Lock()
-	writer := usageActive
+	writer := usageActive.Load()
 	if writer == nil {
-		usageMu.Unlock()
 		return nil
 	}
 	barrier := make(chan struct{})
 	select {
 	case writer.queue <- usageMessage{barrier: barrier}:
-		usageMu.Unlock()
+	case <-writer.stopped:
+		return nil
 	case <-ctx.Done():
-		usageMu.Unlock()
 		return ctx.Err()
 	}
 	select {
 	case <-barrier:
+		return nil
+	case <-writer.stopped:
 		return nil
 	case <-ctx.Done():
 		return ctx.Err()
 	}
 }
 
-// run drains the queue until it is closed, flushing a batch whenever it fills or
-// the flush interval elapses. A barrier flushes and then releases its waiter, so
-// FlushUsage observes everything queued ahead of it.
+// run drains the queue until it is stopped, flushing a batch whenever it fills
+// or the flush interval elapses. A barrier flushes and then releases its waiter,
+// so FlushUsage observes everything queued ahead of it.
 func (w *usageWriter) run() {
 	defer close(w.stopped)
 	batch := make([]UsageRecord, 0, usageBatchSize)
@@ -240,33 +232,45 @@ func (w *usageWriter) run() {
 		insertUsageBatch(batch)
 		batch = batch[:0]
 	}
+	handle := func(message usageMessage) {
+		if message.markUsed != nil {
+			if _, err := Get().Exec(
+				`UPDATE api_keys SET last_used_at = ? WHERE id = ?`,
+				time.Now().UnixMilli(), *message.markUsed,
+			); err != nil {
+				slog.Warn("mark api key used", "id", *message.markUsed, "error", err)
+			}
+			return
+		}
+		if message.barrier != nil {
+			flush()
+			close(message.barrier)
+			return
+		}
+		batch = append(batch, message.record)
+		if len(batch) >= usageBatchSize {
+			flush()
+		}
+	}
 	for {
 		select {
-		case message, ok := <-w.queue:
-			if !ok {
-				flush()
-				return
-			}
-			if message.markUsed != nil {
-				if _, err := Get().Exec(
-					`UPDATE api_keys SET last_used_at = ? WHERE id = ?`,
-					time.Now().UnixMilli(), *message.markUsed,
-				); err != nil {
-					slog.Warn("mark api key used", "id", *message.markUsed, "error", err)
-				}
-				continue
-			}
-			if message.barrier != nil {
-				flush()
-				close(message.barrier)
-				continue
-			}
-			batch = append(batch, message.record)
-			if len(batch) >= usageBatchSize {
-				flush()
-			}
+		case message := <-w.queue:
+			handle(message)
 		case <-ticker.C:
 			flush()
+		case <-w.stop:
+			// Best-effort drain: everything already queued is persisted before
+			// the handle is released. The queue is never closed, so producers
+			// racing with shutdown cannot panic.
+			for {
+				select {
+				case message := <-w.queue:
+					handle(message)
+				default:
+					flush()
+					return
+				}
+			}
 		}
 	}
 }
@@ -324,7 +328,7 @@ func APIKeyQuotaUsage(keyID int64) (QuotaUsage, error) {
 	week := startOfWeekMs(now)
 	month := startOfMonthMs(now)
 	var usage QuotaUsage
-	err := Get().QueryRow(
+	err := Read().QueryRow(
 		`SELECT
 			COALESCE(SUM(CASE WHEN created_at >= ? THEN 1 ELSE 0 END), 0),
 			COALESCE(SUM(CASE WHEN created_at >= ? THEN total_tokens ELSE 0 END), 0),
@@ -375,11 +379,12 @@ func GetAPIKeyByHash(hash string) (*APIKeyRow, error) {
 	if key, ok := cachedAPIKey(hash); ok {
 		return &key, nil
 	}
-	key, err := scanAPIKey(Get().QueryRow(`SELECT `+apiKeyColumns+` FROM api_keys WHERE key_hash = ?`, hash))
+	key, err := scanAPIKey(Read().QueryRow(`SELECT `+apiKeyColumns+` FROM api_keys WHERE key_hash = ?`, hash))
 	if err != nil || key == nil {
 		return key, err
 	}
 	storeAPIKey(hash, *key)
+	rememberQuotaTracking(*key)
 	return key, nil
 }
 
@@ -387,21 +392,26 @@ func GetAPIKeyByHash(hash string) (*APIKeyRow, error) {
 // write per key per minute is plenty.
 const lastUsedInterval = time.Minute
 
-var (
-	lastUsedMu     sync.Mutex
-	lastUsedWrites = map[int64]int64{}
-)
+// lastUsedWrites maps a key id to an atomic timestamp. A sync.Map plus a
+// per-key atomic keeps the per-request "did we already write this minute?"
+// check off a single global mutex.
+var lastUsedWrites sync.Map // map[int64]*atomic.Int64
 
 // MarkAPIKeyUsed records last_used_at, at most once per key per minute.
 func MarkAPIKeyUsed(id int64) {
 	now := time.Now().UnixMilli()
-	lastUsedMu.Lock()
-	if last := lastUsedWrites[id]; now-last < lastUsedInterval.Milliseconds() {
-		lastUsedMu.Unlock()
+	value, ok := lastUsedWrites.Load(id)
+	if !ok {
+		value, _ = lastUsedWrites.LoadOrStore(id, &atomic.Int64{})
+	}
+	last := value.(*atomic.Int64)
+	previous := last.Load()
+	if now-previous < lastUsedInterval.Milliseconds() {
 		return
 	}
-	lastUsedWrites[id] = now
-	lastUsedMu.Unlock()
+	if !last.CompareAndSwap(previous, now) {
+		return
+	}
 	// last_used_at is informational; hand the UPDATE to the batch writer so a
 	// request never waits on the single SQLite connection for it.
 	if enqueueMarkUsed(id) {
@@ -414,18 +424,14 @@ func MarkAPIKeyUsed(id int64) {
 // false when the writer is not running or its queue is full, in which case the
 // caller writes synchronously.
 func enqueueMarkUsed(id int64) bool {
-	usageMu.Lock()
-	writer := usageActive
+	writer := usageActive.Load()
 	if writer == nil {
-		usageMu.Unlock()
 		return false
 	}
 	select {
 	case writer.queue <- usageMessage{markUsed: &id}:
-		usageMu.Unlock()
 		return true
 	default:
-		usageMu.Unlock()
 		return false
 	}
 }

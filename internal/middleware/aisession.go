@@ -59,14 +59,12 @@ func resolveAISession(r *http.Request) string {
 			return sanitizeSession(value)
 		}
 	}
-	if body := ParsedJSON(r.Context()); body != nil {
-		if value, _ := body["user"].(string); strings.TrimSpace(value) != "" {
-			return sanitizeSession(strings.TrimSpace(value))
+	if summary, ok := RequestSummaryFrom(r.Context()); ok {
+		if value := strings.TrimSpace(summary.User); value != "" {
+			return sanitizeSession(value)
 		}
-		if metadata, _ := body["metadata"].(map[string]any); metadata != nil {
-			if value, _ := metadata["user_id"].(string); strings.TrimSpace(value) != "" {
-				return sanitizeSession(strings.TrimSpace(value))
-			}
+		if value := strings.TrimSpace(summary.UserID); value != "" {
+			return sanitizeSession(value)
 		}
 	}
 

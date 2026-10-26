@@ -40,3 +40,52 @@ func TestOpenAIRawRequestAndResponsePassthrough(t *testing.T) {
 		t.Fatalf("usage = %+v", result.Usage)
 	}
 }
+
+func TestOpenAIPayloadSkipsRewriteWhenUnchanged(t *testing.T) {
+	provider := &OpenAI{}
+
+	raw := []byte(`{"model":"upstream-model","stream":true,"messages":[{"role":"user","content":"hi"}],"custom":42}`)
+	got, err := provider.payload(Request{
+		Model:    "upstream-model",
+		RawBytes: raw,
+		RawBody:  map[string]any{"model": "upstream-model", "stream": true},
+	}, true)
+	if err != nil {
+		t.Fatalf("payload: %v", err)
+	}
+	if string(got) != string(raw) {
+		t.Fatalf("payload rewrote unchanged body: got %s", got)
+	}
+
+	// A missing stream flag already means false for chat completions.
+	rawStatic := []byte(`{"model":"upstream-model","messages":[]}`)
+	got, err = provider.payload(Request{
+		Model:    "upstream-model",
+		RawBytes: rawStatic,
+		RawBody:  map[string]any{"model": "upstream-model"},
+	}, false)
+	if err != nil {
+		t.Fatalf("payload: %v", err)
+	}
+	if string(got) != string(rawStatic) {
+		t.Fatalf("payload rewrote unchanged body: got %s", got)
+	}
+}
+
+func TestOpenAIPayloadSkipsRewriteWithSummaryFields(t *testing.T) {
+	provider := &OpenAI{}
+	raw := []byte(`{"model":"upstream-model","stream":false,"messages":[{"role":"user","content":"hi"}],"keep":true}`)
+	got, err := provider.payload(Request{
+		Model:             "upstream-model",
+		RawBytes:          raw,
+		ClientModel:       "upstream-model",
+		ClientStream:      false,
+		ClientStreamKnown: true,
+	}, false)
+	if err != nil {
+		t.Fatalf("payload: %v", err)
+	}
+	if string(got) != string(raw) {
+		t.Fatalf("payload rewrote unchanged body: got %s", got)
+	}
+}

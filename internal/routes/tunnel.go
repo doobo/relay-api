@@ -116,14 +116,14 @@ func (h *TunnelRoutes) handle(w http.ResponseWriter, r *http.Request) {
 	// up) could never both be served.
 	clientMethod := strings.ToUpper(r.Method)
 
-	configHeaders := parseStringMap(apiConfig.Headers)
+	headerTemplates := configHeaderTemplates(apiConfig)
 
 	// Config headers still work, but only headers/query can be templated: a
 	// tunnel never parses the body, so {{body.*}} has nothing to read. Building
 	// the template context is skipped entirely for the common static-header
 	// case, and the upstream map is built in a single header pass.
 	var templateContext map[string]any
-	if hasTemplatePlaceholder(configHeaders) {
+	if headerTemplatesDynamic(headerTemplates) {
 		headersContext := map[string]any{}
 		for key, values := range r.Header {
 			if len(values) > 0 {
@@ -139,12 +139,11 @@ func (h *TunnelRoutes) handle(w http.ResponseWriter, r *http.Request) {
 		templateContext = map[string]any{"headers": headersContext, "query": queryContext, "body": nil}
 	}
 
-	renderedConfigHeaders := map[string]string{}
-	for key, value := range configHeaders {
-		if strings.Contains(value, "{{") {
-			renderedConfigHeaders[key] = asString(util.RenderTemplate(value, templateContext))
-		} else {
-			renderedConfigHeaders[key] = value
+	var renderedConfigHeaders map[string]string
+	if len(headerTemplates) > 0 {
+		renderedConfigHeaders = make(map[string]string, len(headerTemplates))
+		for key, template := range headerTemplates {
+			renderedConfigHeaders[key] = asString(template.Render(templateContext))
 		}
 	}
 	upstreamHeaders := util.ForwardedRequestHeaders(r.Header)
@@ -215,11 +214,12 @@ func (h *TunnelRoutes) handle(w http.ResponseWriter, r *http.Request) {
 	// for a long time. A non-zero timeout is enforced via the request context,
 	// and a client disconnect cancels that context too (r.Context()), so a dead
 	// tunnel does not keep an upstream request alive.
-	response, err := util.FetchUpstream(r.Context(), parsedURL.String(), util.FetchOptions{
+	response, err := util.FetchUpstream(r.Context(), "", util.FetchOptions{
 		Method:    clientMethod,
 		Headers:   upstreamHeaders,
 		Body:      body,
 		TimeoutMs: apiConfig.StreamTimeoutMs,
+		URL:       parsedURL,
 	})
 	if err != nil {
 		if r.Context().Err() != nil {

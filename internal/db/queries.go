@@ -55,19 +55,19 @@ func scanAdminUser(row interface{ Scan(...any) error }) (*AdminUserRow, error) {
 
 // GetAdminUserByName looks an account up by username.
 func GetAdminUserByName(username string) (*AdminUserRow, error) {
-	row := Get().QueryRow(`SELECT `+adminUserColumns+` FROM admin_users WHERE username = ?`, username)
+	row := Read().QueryRow(`SELECT `+adminUserColumns+` FROM admin_users WHERE username = ?`, username)
 	return scanAdminUser(row)
 }
 
 // GetAdminUser looks an account up by id.
 func GetAdminUser(id int64) (*AdminUserRow, error) {
-	row := Get().QueryRow(`SELECT `+adminUserColumns+` FROM admin_users WHERE id = ?`, id)
+	row := Read().QueryRow(`SELECT `+adminUserColumns+` FROM admin_users WHERE id = ?`, id)
 	return scanAdminUser(row)
 }
 
 // ListAdminUsers returns every account, ordered by id.
 func ListAdminUsers() ([]AdminUserRow, error) {
-	rows, err := Get().Query(`SELECT ` + adminUserColumns + ` FROM admin_users ORDER BY id`)
+	rows, err := Read().Query(`SELECT ` + adminUserColumns + ` FROM admin_users ORDER BY id`)
 	if err != nil {
 		return nil, err
 	}
@@ -87,7 +87,7 @@ func ListAdminUsers() ([]AdminUserRow, error) {
 // count: they cannot manage anything.
 func CountEnabledAdmins() (int, error) {
 	var count int
-	err := Get().QueryRow(`SELECT COUNT(*) FROM admin_users WHERE enabled = 1 AND role = 'admin'`).Scan(&count)
+	err := Read().QueryRow(`SELECT COUNT(*) FROM admin_users WHERE enabled = 1 AND role = 'admin'`).Scan(&count)
 	return count, err
 }
 

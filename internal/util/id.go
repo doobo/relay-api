@@ -2,7 +2,10 @@ package util
 
 import (
 	"crypto/rand"
+	"strconv"
 	"strings"
+	"sync/atomic"
+	"time"
 )
 
 // alphabet matches the reference utils/id.ts: lowercase letters and digits, so
@@ -30,6 +33,27 @@ func randomString(n int) string {
 // NewRequestID returns a fresh "req_" identifier, matching newRequestId().
 func NewRequestID() string {
 	return "req_" + randomString(16)
+}
+
+var (
+	fastRequestIDPrefix = randomString(4)
+	fastRequestIDSeq    atomic.Uint64
+)
+
+// NewFastRequestID returns a cheap, process-unique request id for
+// high-frequency paths (the /free tunnel) where a crypto/rand draw per packet
+// is wasted work. The prefix separates processes; the monotonic nanosecond
+// timestamp and counter keep ids ordered and unique within this one.
+func NewFastRequestID() string {
+	var buffer [40]byte
+	out := buffer[:0]
+	out = append(out, "req_"...)
+	out = append(out, fastRequestIDPrefix...)
+	out = append(out, '-')
+	out = strconv.AppendUint(out, uint64(time.Now().UnixNano()), 36)
+	out = append(out, '-')
+	out = strconv.AppendUint(out, fastRequestIDSeq.Add(1), 36)
+	return string(out)
 }
 
 // RandomToken returns a random token of the given length (default 24 in the

@@ -42,7 +42,7 @@ func (g *Gateway) models(w http.ResponseWriter, r *http.Request) {
 	// A key with an allowed-model list only discovers those models.
 	var allowed []string
 	if auth := middleware.APIAuthFrom(r.Context()); auth != nil {
-		allowed = parseStrings(auth.Key.AllowedModels)
+		allowed = auth.Key.AllowedModelList()
 	}
 	data := []map[string]any{}
 	for _, model := range models {

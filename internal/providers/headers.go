@@ -11,24 +11,86 @@ const SessionHeaderName = "_ai_session"
 
 var headerPlaceholderPattern = regexp.MustCompile(`\$\{\s*(headers\.)?([\w-]+)\s*\}`)
 
-// renderHeaderValue resolves ${name} and ${headers.name} against the client
-// headers, plus ${_ai_session} against the resolved session. Unresolved
-// placeholders become empty so a header can be omitted rather than sent with a
-// literal template.
-func renderHeaderValue(template string, request Request) string {
-	// Most provider headers are static; skip the regex machinery entirely.
-	if !strings.Contains(template, "${") {
-		return sanitizeHeaderValue(template)
+type headerSegment struct {
+	literal  string
+	lookup   string
+	isLookup bool
+}
+
+// HeaderTemplate is one pre-parsed custom provider header. Values with
+// ${...} placeholders are split into literal/lookup segments once when the
+// provider config is cached, so the relay no longer runs a regex per header per
+// request.
+type HeaderTemplate struct {
+	name     string
+	value    string
+	dynamic  bool
+	segments []headerSegment
+}
+
+// CompileHeaders parses a provider's custom header map into templates.
+func CompileHeaders(headers map[string]string) []HeaderTemplate {
+	if len(headers) == 0 {
+		return nil
 	}
-	rendered := headerPlaceholderPattern.ReplaceAllStringFunc(template, func(match string) string {
-		parts := headerPlaceholderPattern.FindStringSubmatch(match)
-		name := strings.ToLower(parts[2])
-		if name == SessionHeaderName {
-			return request.Session
+	templates := make([]HeaderTemplate, 0, len(headers))
+	for key, value := range headers {
+		name := strings.TrimSpace(key)
+		if name == "" {
+			continue
 		}
-		return request.ClientHeaders[name]
-	})
-	return sanitizeHeaderValue(rendered)
+		template := HeaderTemplate{name: name}
+		matches := headerPlaceholderPattern.FindAllStringSubmatchIndex(value, -1)
+		if len(matches) == 0 {
+			template.value = sanitizeHeaderValue(value)
+			templates = append(templates, template)
+			continue
+		}
+		template.dynamic = true
+		last := 0
+		for _, match := range matches {
+			if match[0] > last {
+				template.segments = append(template.segments, headerSegment{literal: value[last:match[0]]})
+			}
+			if match[4] >= 0 {
+				template.segments = append(template.segments, headerSegment{
+					lookup:   strings.ToLower(value[match[4]:match[5]]),
+					isLookup: true,
+				})
+			}
+			last = match[1]
+		}
+		if last < len(value) {
+			template.segments = append(template.segments, headerSegment{literal: value[last:]})
+		}
+		templates = append(templates, template)
+	}
+	return templates
+}
+
+// render resolves the template. set is false when a dynamic value renders
+// empty, so optional client headers do not turn into empty upstream headers.
+func (t HeaderTemplate) render(request Request) (value string, set bool) {
+	if !t.dynamic {
+		return t.value, true
+	}
+	var builder strings.Builder
+	for _, segment := range t.segments {
+		if !segment.isLookup {
+			builder.WriteString(segment.literal)
+			continue
+		}
+		if segment.lookup == SessionHeaderName {
+			builder.WriteString(request.Session)
+		} else {
+			builder.WriteString(request.ClientHeaders[segment.lookup])
+		}
+	}
+	value = sanitizeHeaderValue(builder.String())
+	if value == "" {
+		return "", false
+	}
+	return value, true
 }
 
 // sanitizeHeaderValue strips control characters only when present. The common
@@ -52,19 +114,17 @@ func sanitizeHeaderRune(r rune) rune {
 }
 
 // applyCustomHeaders merges cfg.Headers into headers, rendering placeholders.
-// Values that render empty are skipped so optional client headers do not turn
-// into empty upstream headers.
+// Compiled templates are used when present; directly constructed configs (and
+// tests) fall back to one compile per call.
 func applyCustomHeaders(headers map[string]string, cfg Config, request Request) map[string]string {
-	for key, value := range cfg.Headers {
-		name := strings.TrimSpace(key)
-		if name == "" {
-			continue
+	templates := cfg.HeaderTemplates
+	if templates == nil && len(cfg.Headers) > 0 {
+		templates = CompileHeaders(cfg.Headers)
+	}
+	for _, template := range templates {
+		if value, set := template.render(request); set {
+			headers[template.name] = value
 		}
-		rendered := renderHeaderValue(value, request)
-		if rendered == "" && strings.Contains(value, "${") {
-			continue
-		}
-		headers[name] = rendered
 	}
 	if request.OnUpstreamHeaders != nil {
 		request.OnUpstreamHeaders(headers)

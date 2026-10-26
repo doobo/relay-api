@@ -6,7 +6,9 @@ package providers
 import (
 	"context"
 	"net/http"
+	"net/url"
 	"strconv"
+	"strings"
 	"time"
 )
 
@@ -16,12 +18,32 @@ type Config struct {
 	Name    string
 	Type    string
 	BaseURL string
-	APIKey  *string
+	// BaseURLParsed is BaseURL parsed once by the resolver. When present the
+	// provider builds each endpoint from it, avoiding a url.Parse on every
+	// request. Nil falls back to parsing BaseURL per request (tests and
+	// directly constructed configs).
+	BaseURLParsed *url.URL
+	APIKey        *string
 	// Headers are extra upstream headers. Values may contain ${name}
 	// placeholders resolved from the client request headers, or ${_ai_session}
 	// for the resolved client identity.
-	Headers          map[string]string
+	Headers map[string]string
+	// HeaderTemplates is Headers pre-parsed by the resolver. Nil falls back to
+	// compiling Headers per request (tests and directly constructed configs).
+	HeaderTemplates  []HeaderTemplate
 	RequestTimeoutMs int
+}
+
+// endpoint resolves one upstream path against the provider's base URL. It
+// returns either a parsed URL (fast path) or a string for net/http to parse.
+func (c Config) endpoint(path string) (string, *url.URL) {
+	if c.BaseURLParsed == nil {
+		return strings.TrimRight(c.BaseURL, "/") + path, nil
+	}
+	target := *c.BaseURLParsed
+	target.Path = strings.TrimRight(target.Path, "/") + path
+	target.RawPath = ""
+	return "", &target
 }
 
 // Request is a normalized chat request.
@@ -36,6 +58,14 @@ type Request struct {
 	// RawBytes is the exact buffered client body. ResponsesPassthrough uses it
 	// to avoid re-encoding the JSON, preserving formatting and number text.
 	RawBytes []byte
+	// ClientModel and ClientStream are the top-level model/stream values read
+	// from the raw client body. ClientStreamKnown marks ClientStream as
+	// authoritative even when the field was absent (which means false). They
+	// let OpenAI.payload prove the raw bytes need no rewrite without decoding
+	// the body into a map.
+	ClientModel       string
+	ClientStream      bool
+	ClientStreamKnown bool
 	// RawResponse asks an OpenAI-compatible provider to return the upstream
 	// non-streaming body in Result.RawBody and only parse usage. The chat
 	// endpoint uses it so extra upstream fields survive unchanged.

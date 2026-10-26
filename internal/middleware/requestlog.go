@@ -34,12 +34,6 @@ func RequestID(ctx context.Context) string {
 // pure overhead.
 func RequestLog(next http.Handler, skipPrefixes ...string) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		id := r.Header.Get("X-Request-ID")
-		if id == "" {
-			id = util.NewRequestID()
-		}
-		w.Header().Set("X-Request-ID", id)
-
 		logRequest := true
 		for _, prefix := range skipPrefixes {
 			if prefix != "" && strings.HasPrefix(r.URL.Path, prefix) {
@@ -48,19 +42,36 @@ func RequestLog(next http.Handler, skipPrefixes ...string) http.Handler {
 			}
 		}
 
+		id := r.Header.Get("X-Request-ID")
+		if id == "" {
+			if logRequest {
+				id = util.NewRequestID()
+			} else {
+				id = util.NewFastRequestID()
+			}
+		}
+		w.Header().Set("X-Request-ID", id)
+
+		ctx := context.WithValue(r.Context(), requestIDKey, id)
+		if !logRequest {
+			// High-frequency skipped paths (the /free tunnel) get the original
+			// writer and no status recorder: the access log is the only reason
+			// for the wrapper, and crypto/rand ids were pure per-packet cost.
+			next.ServeHTTP(w, r.WithContext(ctx))
+			return
+		}
+
 		rec := &statusRecorder{ResponseWriter: w, status: http.StatusOK}
 		start := time.Now()
-		next.ServeHTTP(rec, r.WithContext(context.WithValue(r.Context(), requestIDKey, id)))
+		next.ServeHTTP(rec, r.WithContext(ctx))
 
-		if logRequest {
-			slog.Info("request",
-				"request_id", id,
-				"method", r.Method,
-				"path", r.URL.Path,
-				"status", rec.status,
-				"latency_ms", time.Since(start).Milliseconds(),
-			)
-		}
+		slog.Info("request",
+			"request_id", id,
+			"method", r.Method,
+			"path", r.URL.Path,
+			"status", rec.status,
+			"latency_ms", time.Since(start).Milliseconds(),
+		)
 	})
 }
 

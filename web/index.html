@@ -384,10 +384,14 @@
   <!-- One shared confirmation dialog for destructive row actions (deleting a
        key, config or admin user). All copy is filled in by core/dom.js
        askConfirm, which also runs the action and inlines any failure here. -->
-  <dialog id="confirmDialog">
-    <h3 id="confirmDialogTitle"></h3>
-    <form id="confirmDialogForm">
-      <p class="hint" id="confirmDialogMessage"></p>
+  <dialog id="confirmDialog" class="dialog">
+    <div class="dialog-head">
+      <h3 id="confirmDialogTitle"></h3>
+    </div>
+    <form id="confirmDialogForm" class="dialog-form">
+      <div class="dialog-body">
+        <p class="hint" id="confirmDialogMessage"></p>
+      </div>
       <div class="dialog-actions">
         <button type="button" id="confirmDialogCancel" class="secondary">Cancel</button>
         <button type="submit" id="confirmDialogOk" class="danger">Delete</button>
@@ -395,13 +399,17 @@
     </form>
   </dialog>
 
-  <dialog id="resetPwDialog">
-    <h3>Reset password for <span id="resetPwUser"></span></h3>
+  <dialog id="resetPwDialog" class="dialog">
+    <div class="dialog-head">
+      <h3>Reset password for <span id="resetPwUser"></span></h3>
+    </div>
     <!-- Left blank, the field means "pick a password for me": the generated
          value is then shown in the result panel below - exactly once. -->
-    <form id="resetPwForm">
-      <input type="password" name="newPassword" placeholder="new password (blank = random)" minlength="8" autocomplete="new-password">
-      <p class="hint">Leave blank to generate a random password.</p>
+    <form id="resetPwForm" class="dialog-form">
+      <div class="dialog-body">
+        <input type="password" name="newPassword" placeholder="new password (blank = random)" minlength="8" autocomplete="new-password">
+        <p class="hint">Leave blank to generate a random password.</p>
+      </div>
       <div class="dialog-actions">
         <button type="button" id="resetPwCancel" class="secondary">Cancel</button>
         <button type="submit">Reset</button>
@@ -409,32 +417,38 @@
     </form>
     <!-- Replaces the form once a reset is done, so closing and reopening the
          dialog cannot surface the password a second time. -->
-    <div id="resetPwResult" class="hidden">
-      <p class="hint">
-        New password for <span id="resetPwResultUser"></span> - copy it now, it is shown only once:
-      </p>
-      <p class="pw-result"><code id="resetPwResultValue"></code></p>
+    <div id="resetPwResult" class="dialog-form hidden">
+      <div class="dialog-body">
+        <p class="hint">
+          New password for <span id="resetPwResultUser"></span> - copy it now, it is shown only once:
+        </p>
+        <p class="pw-result"><code id="resetPwResultValue"></code></p>
+      </div>
       <div class="dialog-actions">
         <button type="button" id="resetPwDone" class="secondary">Done</button>
       </div>
     </div>
   </dialog>
 
-  <dialog id="providerEditDialog">
-    <h3>Edit provider <span id="providerEditName"></span></h3>
-    <form id="providerEditForm" data-id="">
-      <input name="name" placeholder="name" required>
-      <select name="type">
-        <option value="openai">openai</option>
-        <option value="anthropic">anthropic</option>
-        <option value="compatible">compatible</option>
-        <option value="openai-responses">openai-responses</option>
-      </select>
-      <input name="baseUrl" placeholder="https://api.example.com/v1" required>
-      <input name="apiKey" placeholder="new API key (leave blank to keep)" autocomplete="off">
-      <input name="headers" placeholder='headers JSON e.g. {"x-user-id":"${uuid}"}' autocomplete="off">
-      <p class="hint">Header values may use <code>${client_header}</code> and <code>${_ai_session}</code>.</p>
-      <label class="check-row"><input type="checkbox" name="enabled"> enabled</label>
+  <dialog id="providerEditDialog" class="dialog">
+    <div class="dialog-head">
+      <h3>Edit provider <span id="providerEditName"></span></h3>
+    </div>
+    <form id="providerEditForm" class="dialog-form" data-id="">
+      <div class="dialog-body">
+        <input name="name" placeholder="name" required>
+        <select name="type">
+          <option value="openai">openai</option>
+          <option value="anthropic">anthropic</option>
+          <option value="compatible">compatible</option>
+          <option value="openai-responses">openai-responses</option>
+        </select>
+        <input name="baseUrl" placeholder="https://api.example.com/v1" required>
+        <input name="apiKey" placeholder="new API key (leave blank to keep)" autocomplete="off">
+        <input name="headers" placeholder='headers JSON e.g. {"x-user-id":"${uuid}"}' autocomplete="off">
+        <p class="hint">Header values may use <code>${client_header}</code> and <code>${_ai_session}</code>.</p>
+        <label class="check-row"><input type="checkbox" name="enabled"> enabled</label>
+      </div>
       <div class="dialog-actions">
         <button type="button" id="providerEditCancel" class="secondary">Cancel</button>
         <button type="submit">Save</button>
@@ -444,32 +458,36 @@
 
   <!-- One dialog serves both add and edit: the mode (and, when editing, the
        row id) is carried on the form's data attributes by tabs/configs.js. -->
-  <dialog id="configDialog">
-    <h3 id="configDialogTitle">Add config</h3>
-    <form id="configForm" data-id="" data-mode="create">
-      <input name="name" placeholder="name e.g. weather, api/*, api/**" required>
-      <input name="url" placeholder="https://api.example.com/weather" required>
-      <select name="method" id="configMethod">
-        <option value="POST">POST</option>
-        <option value="GET">GET</option>
-        <option value="PUT">PUT</option>
-        <option value="DELETE">DELETE</option>
-        <option value="PATCH">PATCH</option>
-        <option value="NONE">None (any method)</option>
-        <option value="">Custom…</option>
-      </select>
-      <input name="customMethod" id="configCustomMethod" placeholder="custom method" class="hidden" maxlength="16">
-      <select name="route" id="configRoute" aria-label="Route">
-        <option value="open">/open/* — API key required</option>
-        <option value="free">/free/* — public, no key</option>
-      </select>
-      <input name="streamTimeoutMs" type="number" min="0" placeholder="stream timeout ms on /free (0 = no timeout)">
-      <input name="streamMaxBodyMb" type="number" min="0" placeholder="stream body limit MB on /free (0 = unlimited)">
-      <input name="apiKey" placeholder="upstream key (optional)" autocomplete="off">
-      <input name="headers" placeholder='{"Authorization":"Bearer ..."} (JSON, optional)'>
-      <input name="requestTemplate" placeholder='{"city":"{{body.city}}"} (JSON, optional)'>
-      <input name="responseTemplate" placeholder='{"content":"{{data.result}}"} (JSON, optional)'>
-      <label class="check-row"><input type="checkbox" name="enabled"> enabled</label>
+  <dialog id="configDialog" class="dialog">
+    <div class="dialog-head">
+      <h3 id="configDialogTitle">Add config</h3>
+    </div>
+    <form id="configForm" class="dialog-form" data-id="" data-mode="create">
+      <div class="dialog-body">
+        <input name="name" placeholder="name e.g. weather, api/*, api/**" required>
+        <input name="url" placeholder="https://api.example.com/weather" required>
+        <select name="method" id="configMethod">
+          <option value="POST">POST</option>
+          <option value="GET">GET</option>
+          <option value="PUT">PUT</option>
+          <option value="DELETE">DELETE</option>
+          <option value="PATCH">PATCH</option>
+          <option value="NONE">None (any method)</option>
+          <option value="">Custom…</option>
+        </select>
+        <input name="customMethod" id="configCustomMethod" placeholder="custom method" class="hidden" maxlength="16">
+        <select name="route" id="configRoute" aria-label="Route">
+          <option value="open">/open/* — API key required</option>
+          <option value="free">/free/* — public, no key</option>
+        </select>
+        <input name="streamTimeoutMs" type="number" min="0" placeholder="stream timeout ms on /free (0 = no timeout)">
+        <input name="streamMaxBodyMb" type="number" min="0" placeholder="stream body limit MB on /free (0 = unlimited)">
+        <input name="apiKey" placeholder="upstream key (optional)" autocomplete="off">
+        <input name="headers" placeholder='{"Authorization":"Bearer ..."} (JSON, optional)'>
+        <input name="requestTemplate" placeholder='{"city":"{{body.city}}"} (JSON, optional)'>
+        <input name="responseTemplate" placeholder='{"content":"{{data.result}}"} (JSON, optional)'>
+        <label class="check-row"><input type="checkbox" name="enabled"> enabled</label>
+      </div>
       <div class="dialog-actions">
         <button type="button" id="configDialogCancel" class="secondary">Cancel</button>
         <button type="submit" id="configDialogSubmit">Create</button>
@@ -477,70 +495,73 @@
     </form>
   </dialog>
 
-  <dialog id="keyDialog">
-    <h3 id="keyDialogTitle">Add API key</h3>
-    <form id="keyForm" data-id="">
-      <label class="field">
-        <span>Name</span>
-        <input name="name" placeholder="e.g. laptop" required maxlength="64">
-      </label>
-      <label class="field">
-        <span>Scope</span>
-        <select name="scope">
-          <option value="both">both (AI + forwarding)</option>
-          <option value="ai">ai (/v1/* only)</option>
-          <option value="api">api (/open/* only)</option>
-        </select>
-      </label>
-      <label class="field">
-        <span>Rate limit (requests per minute)</span>
-        <input name="rateLimit" type="number" inputmode="numeric" min="1" value="60" required>
-      </label>
-      <label class="check-row hidden" id="keyEnabledField">
-        <input type="checkbox" name="enabled"> enabled
-      </label>
-
-      <fieldset>
-        <legend>Allowed models (none selected = all models)</legend>
+  <dialog id="keyDialog" class="dialog">
+    <div class="dialog-head">
+      <h3 id="keyDialogTitle">Add API key</h3>
+    </div>
+    <form id="keyForm" class="dialog-form" data-id="">
+      <div class="dialog-body">
         <label class="field">
-          <span>Filter</span>
-          <input id="keyModelSearch" type="search" placeholder="Filter model aliases..." autocomplete="off">
+          <span>Name</span>
+          <input name="name" placeholder="e.g. laptop" required maxlength="64">
         </label>
-        <div id="keyModelList" class="model-checklist" data-ready="false"></div>
-        <p class="hint">Select one or more model aliases to restrict this key. Selecting none allows every model.</p>
-      </fieldset>
+        <label class="field">
+          <span>Scope</span>
+          <select name="scope">
+            <option value="both">both (AI + forwarding)</option>
+            <option value="ai">ai (/v1/* only)</option>
+            <option value="api">api (/open/* only)</option>
+          </select>
+        </label>
+        <label class="field">
+          <span>Rate limit (requests per minute)</span>
+          <input name="rateLimit" type="number" inputmode="numeric" min="1" value="60" required>
+        </label>
+        <label class="check-row hidden" id="keyEnabledField">
+          <input type="checkbox" name="enabled"> enabled
+        </label>
 
-      <fieldset>
-        <legend>Quotas (0 = unlimited)</legend>
-        <div class="field-grid">
+        <fieldset>
+          <legend>Allowed models (none selected = all models)</legend>
           <label class="field">
-            <span>Daily requests</span>
-            <input name="dailyRequestLimit" type="number" inputmode="numeric" min="0" step="1" value="0">
+            <span>Filter</span>
+            <input id="keyModelSearch" type="search" placeholder="Filter model aliases..." autocomplete="off">
           </label>
-          <label class="field">
-            <span>Daily tokens (millions)</span>
-            <input name="dailyTokenLimit" type="number" inputmode="decimal" min="0" step="any" value="0">
-          </label>
-          <label class="field">
-            <span>Weekly requests</span>
-            <input name="weeklyRequestLimit" type="number" inputmode="numeric" min="0" step="1" value="0">
-          </label>
-          <label class="field">
-            <span>Weekly tokens (millions)</span>
-            <input name="weeklyTokenLimit" type="number" inputmode="decimal" min="0" step="any" value="0">
-          </label>
-          <label class="field">
-            <span>Monthly requests</span>
-            <input name="monthlyRequestLimit" type="number" inputmode="numeric" min="0" step="1" value="0">
-          </label>
-          <label class="field">
-            <span>Monthly tokens (millions)</span>
-            <input name="monthlyTokenLimit" type="number" inputmode="decimal" min="0" step="any" value="0">
-          </label>
-        </div>
-        <p class="hint">Day / week (Monday) / month reset on local boundaries. Token values are in millions (e.g. 1.5 = 1,500,000 tokens).</p>
-      </fieldset>
+          <div id="keyModelList" class="model-checklist" data-ready="false"></div>
+          <p class="hint">Select one or more model aliases to restrict this key. Selecting none allows every model.</p>
+        </fieldset>
 
+        <fieldset>
+          <legend>Quotas (0 = unlimited)</legend>
+          <div class="field-grid">
+            <label class="field">
+              <span>Daily requests</span>
+              <input name="dailyRequestLimit" type="number" inputmode="numeric" min="0" step="1" value="0">
+            </label>
+            <label class="field">
+              <span>Daily tokens (millions)</span>
+              <input name="dailyTokenLimit" type="number" inputmode="decimal" min="0" step="any" value="0">
+            </label>
+            <label class="field">
+              <span>Weekly requests</span>
+              <input name="weeklyRequestLimit" type="number" inputmode="numeric" min="0" step="1" value="0">
+            </label>
+            <label class="field">
+              <span>Weekly tokens (millions)</span>
+              <input name="weeklyTokenLimit" type="number" inputmode="decimal" min="0" step="any" value="0">
+            </label>
+            <label class="field">
+              <span>Monthly requests</span>
+              <input name="monthlyRequestLimit" type="number" inputmode="numeric" min="0" step="1" value="0">
+            </label>
+            <label class="field">
+              <span>Monthly tokens (millions)</span>
+              <input name="monthlyTokenLimit" type="number" inputmode="decimal" min="0" step="any" value="0">
+            </label>
+          </div>
+          <p class="hint">Day / week (Monday) / month reset on local boundaries. Token values are in millions (e.g. 1.5 = 1,500,000 tokens).</p>
+        </fieldset>
+      </div>
       <div class="dialog-actions">
         <button type="button" id="keyDialogCancel" class="secondary">Cancel</button>
         <button type="submit" id="keyDialogSubmit">Create</button>
@@ -548,15 +569,19 @@
     </form>
   </dialog>
 
-  <dialog id="modelEditDialog">
-    <h3>Edit model <span id="modelEditName"></span></h3>
-    <form id="modelEditForm" data-id="">
-      <input name="name" placeholder="alias e.g. gpt" required>
-      <input name="providerSearch" placeholder="search provider..." autocomplete="off" list="providerEditOptions">
-      <datalist id="providerEditOptions"></datalist>
-      <input name="providerId" placeholder="provider id" type="number" inputmode="numeric" required>
-      <input name="upstreamModel" placeholder="upstream model e.g. gpt-5" required>
-      <label class="check-row"><input type="checkbox" name="enabled"> enabled</label>
+  <dialog id="modelEditDialog" class="dialog">
+    <div class="dialog-head">
+      <h3>Edit model <span id="modelEditName"></span></h3>
+    </div>
+    <form id="modelEditForm" class="dialog-form" data-id="">
+      <div class="dialog-body">
+        <input name="name" placeholder="alias e.g. gpt" required>
+        <input name="providerSearch" placeholder="search provider..." autocomplete="off" list="providerEditOptions">
+        <datalist id="providerEditOptions"></datalist>
+        <input name="providerId" placeholder="provider id" type="number" inputmode="numeric" required>
+        <input name="upstreamModel" placeholder="upstream model e.g. gpt-5" required>
+        <label class="check-row"><input type="checkbox" name="enabled"> enabled</label>
+      </div>
       <div class="dialog-actions">
         <button type="button" id="modelEditCancel" class="secondary">Cancel</button>
         <button type="submit">Save</button>
@@ -564,13 +589,17 @@
     </form>
   </dialog>
 
-  <dialog id="usageDetailDialog">
-    <h3>Request details</h3>
-    <p id="usageDetailMeta" class="detail-meta"></p>
-    <h4>Request headers</h4>
-    <pre id="usageDetailRequestHeaders" class="code-block"></pre>
-    <h4>Upstream headers</h4>
-    <pre id="usageDetailUpstreamHeaders" class="code-block"></pre>
+  <dialog id="usageDetailDialog" class="dialog">
+    <div class="dialog-head">
+      <h3>Request details</h3>
+    </div>
+    <div class="dialog-body">
+      <p id="usageDetailMeta" class="detail-meta"></p>
+      <h4>Request headers</h4>
+      <pre id="usageDetailRequestHeaders" class="code-block"></pre>
+      <h4>Upstream headers</h4>
+      <pre id="usageDetailUpstreamHeaders" class="code-block"></pre>
+    </div>
     <div class="dialog-actions">
       <button type="button" id="usageDetailClose" class="secondary">Close</button>
     </div>

@@ -1,6 +1,7 @@
 package db
 
 import (
+	"encoding/json"
 	"sort"
 	"sync"
 
@@ -60,6 +61,7 @@ func enabledAPIConfigs() ([]APIConfigRow, map[string]*configRouteIndex, error) {
 	if err != nil {
 		return nil, nil, err
 	}
+	compileAPIConfigTemplates(items)
 	index := buildConfigIndex(items)
 	configCacheMu.Lock()
 	configCacheItems = items
@@ -67,6 +69,40 @@ func enabledAPIConfigs() ([]APIConfigRow, map[string]*configRouteIndex, error) {
 	configCacheValid = true
 	configCacheMu.Unlock()
 	return items, index, nil
+}
+
+// compileAPIConfigTemplates parses each config's headers and request/response
+// template once, when the cache is built, so the forwarder does not decode JSON
+// or compile template paths on every request.
+func compileAPIConfigTemplates(items []APIConfigRow) {
+	for position := range items {
+		config := &items[position]
+		if config.Headers != nil && *config.Headers != "" {
+			var headers map[string]string
+			if err := json.Unmarshal([]byte(*config.Headers), &headers); err == nil && len(headers) > 0 {
+				templates := make(map[string]*util.Template, len(headers))
+				for name, value := range headers {
+					templates[name] = util.ParseTemplate(value)
+				}
+				config.ParsedHeaders = templates
+			}
+		}
+		config.ParsedRequestTemplate = compileJSONTemplate(config.RequestTemplate)
+		config.ParsedResponseTemplate = compileJSONTemplate(config.ResponseTemplate)
+	}
+}
+
+// compileJSONTemplate decodes one stored JSON template value; nil when absent,
+// invalid or JSON null (matching the previous parseJSONValue semantics).
+func compileJSONTemplate(raw *string) *util.Template {
+	if raw == nil || *raw == "" {
+		return nil
+	}
+	var value any
+	if err := json.Unmarshal([]byte(*raw), &value); err != nil || value == nil {
+		return nil
+	}
+	return util.ParseTemplate(value)
 }
 
 // buildConfigIndex groups configs by mount, indexes exact names and sorts each
@@ -99,7 +135,7 @@ func buildConfigIndex(items []APIConfigRow) map[string]*configRouteIndex {
 
 // ListEnabledAPIConfigs returns every enabled config, straight from SQLite.
 func ListEnabledAPIConfigs() ([]APIConfigRow, error) {
-	rows, err := Get().Query(`SELECT ` + apiConfigColumns + ` FROM api_configs WHERE enabled = 1`)
+	rows, err := Read().Query(`SELECT ` + apiConfigColumns + ` FROM api_configs WHERE enabled = 1`)
 	if err != nil {
 		return nil, err
 	}
