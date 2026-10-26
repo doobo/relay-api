@@ -467,6 +467,7 @@ func nullInt(value *int64) any {
 type APIKeyPatch struct {
 	Name                *string
 	Scope               *string
+	AllowedModels       *string
 	RateLimit           *int
 	Enabled             *bool
 	DailyRequestLimit   *int
@@ -499,12 +500,22 @@ func UpdateAPIKey(id int64, patch APIKeyPatch) (*APIKeyRow, error) {
 	if patch.Enabled != nil {
 		enabled = *patch.Enabled
 	}
+	// An empty string clears the restriction (NULL = every model allowed).
+	allowedModels := existing.AllowedModels
+	if patch.AllowedModels != nil {
+		if *patch.AllowedModels == "" {
+			allowedModels = nil
+		} else {
+			allowedModels = patch.AllowedModels
+		}
+	}
 	_, err = Get().Exec(
-		`UPDATE api_keys SET name = ?, scope = ?, rate_limit = ?, enabled = ?,
+		`UPDATE api_keys SET name = ?, scope = ?, allowed_models = ?, rate_limit = ?, enabled = ?,
 			daily_request_limit = ?, daily_token_limit = ?, weekly_request_limit = ?, weekly_token_limit = ?,
 			monthly_request_limit = ?, monthly_token_limit = ? WHERE id = ?`,
 		pickString(patch.Name, existing.Name),
 		pickString(patch.Scope, existing.Scope),
+		nullString(allowedModels),
 		pickInt(patch.RateLimit, existing.RateLimit),
 		boolToInt(enabled),
 		pickInt(patch.DailyRequestLimit, existing.DailyRequestLimit),

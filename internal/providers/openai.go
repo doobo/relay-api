@@ -40,9 +40,31 @@ func (p *OpenAI) buildBody(request Request, stream bool) map[string]any {
 	return body
 }
 
+// payload pins model/stream on the exact client bytes when they are available,
+// falling back to a map round-trip for callers that pass only RawBody.
+func (p *OpenAI) payload(request Request, stream bool) ([]byte, error) {
+	if len(request.RawBytes) > 0 {
+		modelValue, err := json.Marshal(request.Model)
+		if err != nil {
+			return nil, err
+		}
+		streamValue := json.RawMessage("false")
+		if stream {
+			streamValue = json.RawMessage("true")
+		}
+		if rewritten, err := util.RewriteTopLevelJSON(request.RawBytes, map[string]json.RawMessage{
+			"model":  modelValue,
+			"stream": streamValue,
+		}); err == nil {
+			return rewritten, nil
+		}
+	}
+	return json.Marshal(p.buildBody(request, stream))
+}
+
 // Chat performs a non-streaming completion.
 func (p *OpenAI) Chat(ctx context.Context, request Request) (*Result, error) {
-	payload, err := json.Marshal(p.buildBody(request, false))
+	payload, err := p.payload(request, false)
 	if err != nil {
 		return nil, err
 	}
@@ -59,6 +81,22 @@ func (p *OpenAI) Chat(ctx context.Context, request Request) (*Result, error) {
 	_ = response.Body.Close()
 	if response.StatusCode < 200 || response.StatusCode >= 300 {
 		return nil, &util.UpstreamStatusError{Status: response.StatusCode, Body: truncate(string(body), 500)}
+	}
+
+	if request.RawResponse {
+		// Validate the body and extract usage without decoding the choices, so
+		// the handler can write the upstream bytes verbatim.
+		var usageOnly struct {
+			Usage *Usage `json:"usage"`
+		}
+		if err := json.Unmarshal(body, &usageOnly); err != nil {
+			return nil, err
+		}
+		return &Result{
+			Usage:   usageOnly.Usage,
+			Headers: util.FilterResponseHeaders(response.Header),
+			RawBody: body,
+		}, nil
 	}
 
 	var parsed struct {
@@ -105,7 +143,7 @@ func (p *OpenAI) Chat(ctx context.Context, request Request) (*Result, error) {
 
 // ChatStream performs a streaming completion, returning the upstream response.
 func (p *OpenAI) ChatStream(ctx context.Context, request Request) (*http.Response, error) {
-	payload, err := json.Marshal(p.buildBody(request, true))
+	payload, err := p.payload(request, true)
 	if err != nil {
 		return nil, err
 	}

@@ -6,6 +6,7 @@ import (
 	"relay-api/internal/config"
 	"relay-api/internal/db"
 	"relay-api/internal/httperr"
+	"relay-api/internal/middleware"
 	"relay-api/internal/router"
 )
 
@@ -38,9 +39,17 @@ func (g *Gateway) models(w http.ResponseWriter, r *http.Request) {
 		internalError(w, "list models", err)
 		return
 	}
+	// A key with an allowed-model list only discovers those models.
+	var allowed []string
+	if auth := middleware.APIAuthFrom(r.Context()); auth != nil {
+		allowed = parseStrings(auth.Key.AllowedModels)
+	}
 	data := []map[string]any{}
 	for _, model := range models {
 		if !model.Enabled {
+			continue
+		}
+		if len(allowed) > 0 && !containsString(allowed, model.Name) {
 			continue
 		}
 		data = append(data, map[string]any{

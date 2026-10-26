@@ -214,6 +214,60 @@ func TestAdminConfigStatsAndAssociations(t *testing.T) {
 	})
 }
 
+func TestAdminAPIKeyAllowedModels(t *testing.T) {
+	harness := newAdminHarness(t)
+
+	recorder := harness.call(t, http.MethodPost, "/admin/api-keys",
+		`{"name":"limited","allowedModels":["m1","m2"]}`)
+	if recorder.Code != http.StatusCreated {
+		t.Fatalf("create status = %d, body = %s", recorder.Code, recorder.Body.String())
+	}
+	var created apiKeyDTO
+	decodeInto(t, recorder, &created)
+	if created.AllowedModels == nil || *created.AllowedModels != `["m1","m2"]` {
+		t.Fatalf("unexpected allowed models: %+v", created.AllowedModels)
+	}
+
+	t.Run("update replaces the list", func(t *testing.T) {
+		recorder := harness.call(t, http.MethodPut, "/admin/api-keys/"+itoa(created.ID),
+			`{"allowedModels":["m3"]}`)
+		if recorder.Code != http.StatusOK {
+			t.Fatalf("status = %d, body = %s", recorder.Code, recorder.Body.String())
+		}
+		var updated apiKeyDTO
+		decodeInto(t, recorder, &updated)
+		if updated.AllowedModels == nil || *updated.AllowedModels != `["m3"]` {
+			t.Fatalf("unexpected allowed models: %+v", updated.AllowedModels)
+		}
+	})
+
+	t.Run("omitting the field keeps the list", func(t *testing.T) {
+		recorder := harness.call(t, http.MethodPut, "/admin/api-keys/"+itoa(created.ID),
+			`{"name":"renamed"}`)
+		if recorder.Code != http.StatusOK {
+			t.Fatalf("status = %d, body = %s", recorder.Code, recorder.Body.String())
+		}
+		var updated apiKeyDTO
+		decodeInto(t, recorder, &updated)
+		if updated.AllowedModels == nil || *updated.AllowedModels != `["m3"]` {
+			t.Fatalf("unexpected allowed models: %+v", updated.AllowedModels)
+		}
+	})
+
+	t.Run("empty list clears the restriction", func(t *testing.T) {
+		recorder := harness.call(t, http.MethodPut, "/admin/api-keys/"+itoa(created.ID),
+			`{"allowedModels":[]}`)
+		if recorder.Code != http.StatusOK {
+			t.Fatalf("status = %d, body = %s", recorder.Code, recorder.Body.String())
+		}
+		var updated apiKeyDTO
+		decodeInto(t, recorder, &updated)
+		if updated.AllowedModels != nil {
+			t.Fatalf("allowed models not cleared: %+v", updated.AllowedModels)
+		}
+	})
+}
+
 func TestAdminUsageLogsAndCleanup(t *testing.T) {
 	harness := newAdminHarness(t)
 

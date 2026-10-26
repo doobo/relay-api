@@ -37,7 +37,11 @@ type Resolver struct {
 	// write bumps the generation and the next lookup repopulates the maps,
 	// taking the per-request model_routes/providers query and key decryption
 	// off the relay path.
-	mu      sync.Mutex
+	//
+	// Hits take the read lock only; the write lock is reserved for refreshes
+	// and cache fills so concurrent AI requests do not serialise on every
+	// resolution.
+	mu      sync.RWMutex
 	gen     uint64
 	routes  map[string][]Route
 	configs map[int64]providers.Config
@@ -53,7 +57,7 @@ func NewResolver(secrets *util.SecretBox) *Resolver {
 }
 
 // refreshLocked drops cached routing data when the database generation moved.
-// Caller holds r.mu.
+// Caller holds r.mu for writing.
 func (r *Resolver) refreshLocked(gen uint64) {
 	if r.gen == gen {
 		return
@@ -67,6 +71,18 @@ func (r *Resolver) refreshLocked(gen uint64) {
 // returned slice is shared and must be treated as read-only.
 func (r *Resolver) Resolve(modelName string) ([]Route, error) {
 	gen := db.AIResourceGeneration()
+	r.mu.RLock()
+	if r.gen == gen {
+		if routes, ok := r.routes[modelName]; ok {
+			r.mu.RUnlock()
+			return routes, nil
+		}
+	}
+	r.mu.RUnlock()
+
+	// A miss may also mean the routing generation moved. Refresh under the
+	// write lock so the cache is usable again, and re-check in case another
+	// request filled this alias while we were between locks.
 	r.mu.Lock()
 	r.refreshLocked(gen)
 	if routes, ok := r.routes[modelName]; ok {
@@ -84,7 +100,11 @@ func (r *Resolver) Resolve(modelName string) ([]Route, error) {
 	if len(routes) > 0 {
 		r.mu.Lock()
 		if r.gen == gen {
-			r.routes[modelName] = routes
+			if cached, ok := r.routes[modelName]; ok {
+				routes = cached
+			} else {
+				r.routes[modelName] = routes
+			}
 		}
 		r.mu.Unlock()
 	}
@@ -144,14 +164,29 @@ func (r *Resolver) resolveUncached(modelName string) ([]Route, error) {
 // cached per provider and generation.
 func (r *Resolver) ProviderConfig(route Route, requestTimeoutMs int) (providers.Config, error) {
 	gen := db.AIResourceGeneration()
-	r.mu.Lock()
-	r.refreshLocked(gen)
-	cfg, ok := r.configs[route.Provider.ID]
-	r.mu.Unlock()
+	r.mu.RLock()
+	var cfg providers.Config
+	ok := false
+	if r.gen == gen {
+		cfg, ok = r.configs[route.Provider.ID]
+	}
+	r.mu.RUnlock()
 	if ok {
 		cfg.RequestTimeoutMs = requestTimeoutMs
 		return cfg, nil
 	}
+
+	// A miss may also mean the routing generation moved; refresh so the cache
+	// is usable again and re-check another request's fill before going to
+	// SQLite.
+	r.mu.Lock()
+	r.refreshLocked(gen)
+	if cached, cachedOK := r.configs[route.Provider.ID]; cachedOK {
+		r.mu.Unlock()
+		cached.RequestTimeoutMs = requestTimeoutMs
+		return cached, nil
+	}
+	r.mu.Unlock()
 
 	// A caller may still hold a Route resolved before the last write. Re-read
 	// the provider row on a cache miss so the first request after a change
@@ -169,9 +204,14 @@ func (r *Resolver) ProviderConfig(route Route, requestTimeoutMs int) (providers.
 	}
 	r.mu.Lock()
 	if r.gen == gen {
-		r.configs[route.Provider.ID] = cfg
+		if cached, cachedOK := r.configs[route.Provider.ID]; cachedOK {
+			cfg = cached
+		} else {
+			r.configs[route.Provider.ID] = cfg
+		}
 	}
 	r.mu.Unlock()
+	cfg.RequestTimeoutMs = requestTimeoutMs
 	return cfg, nil
 }
 

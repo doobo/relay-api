@@ -1,6 +1,7 @@
 package routes
 
 import (
+	"bytes"
 	"context"
 	"crypto/rand"
 	"encoding/hex"
@@ -19,6 +20,13 @@ import (
 	"relay-api/internal/providers"
 	"relay-api/internal/router"
 	"relay-api/internal/util"
+)
+
+var (
+	responsesDoneMarker      = []byte("[DONE]")
+	responsesCompletedMarker = []byte("response.completed")
+	responsesFailedMarker    = []byte("response.failed")
+	responsesUsageMarker     = []byte(`"usage"`)
 )
 
 // responses implements POST /v1/responses, the OpenAI Responses API surface
@@ -88,27 +96,14 @@ func (g *Gateway) responses(w http.ResponseWriter, r *http.Request) {
 	if auth != nil {
 		apiKeyID = auth.Key.ID
 	}
-	clientHeaders := map[string]string{}
-	for key, values := range r.Header {
-		if len(values) > 0 {
-			clientHeaders[strings.ToLower(key)] = values[0]
-		}
-	}
-
-	var requestHeaders *string
-	if g.cfg.UsageHeaderSnapshots {
-		requestHeaders = snapshotHTTPHeaders(r.Header)
-	}
-	var upstreamHeaders *string
+	var clientHeaders map[string]string
+	var upstreamHeaders map[string]string
 
 	baseRequest := providers.Request{
-		Stream:        stream,
-		ClientHeaders: clientHeaders,
-		Session:       middleware.AISessionFrom(r.Context()),
+		Stream:  stream,
+		Session: middleware.AISessionFrom(r.Context()),
 		OnUpstreamHeaders: func(headers map[string]string) {
-			if g.cfg.UsageHeaderSnapshots {
-				upstreamHeaders = snapshotHeaderMap(headers)
-			}
+			upstreamHeaders = headers
 		},
 	}
 
@@ -119,15 +114,17 @@ func (g *Gateway) responses(w http.ResponseWriter, r *http.Request) {
 			httperr.Write(w, http.StatusInternalServerError, err.Error(), "internal_error", "provider_key_undecryptable")
 			return
 		}
+		if len(providerCfg.Headers) > 0 && clientHeaders == nil {
+			clientHeaders = clientHeaderMap(r.Header)
+		}
 		meta := responsesMeta{
-			requestID:       requestID,
-			apiKeyID:        apiKeyID,
-			model:           model,
-			provider:        route.Provider.Name,
-			startedAt:       startedAt,
-			requestHeaders:  requestHeaders,
-			upstreamHeaders: upstreamHeaders,
-			stream:          stream,
+			requestID:      requestID,
+			apiKeyID:       apiKeyID,
+			model:          model,
+			provider:       route.Provider.Name,
+			startedAt:      startedAt,
+			requestHeaders: r.Header,
+			stream:         stream,
 		}
 
 		// A `responses` provider speaks the Responses protocol natively: forward
@@ -138,6 +135,7 @@ func (g *Gateway) responses(w http.ResponseWriter, r *http.Request) {
 			request.Model = route.UpstreamModel
 			request.RawBody = rawBody
 			request.RawBytes = middleware.RequestBody(r.Context())
+			request.ClientHeaders = clientHeaders
 			upstream, err := providers.ResponsesPassthrough(passCtx, providerCfg, request)
 			if err != nil {
 				cancelPass()
@@ -145,7 +143,7 @@ func (g *Gateway) responses(w http.ResponseWriter, r *http.Request) {
 					lastErr = err
 					continue
 				}
-				g.writeUpstreamError(w, r, err, apiKeyID, model, route.Provider.Name, startedAt, stream, requestHeaders, upstreamHeaders)
+				g.writeUpstreamError(w, r, err, apiKeyID, model, route.Provider.Name, startedAt, stream, r.Header, upstreamHeaders)
 				return
 			}
 			if upstream.StatusCode < 200 || upstream.StatusCode >= 300 {
@@ -156,9 +154,10 @@ func (g *Gateway) responses(w http.ResponseWriter, r *http.Request) {
 					lastErr = statusErr
 					continue
 				}
-				g.writeUpstreamError(w, r, statusErr, apiKeyID, model, route.Provider.Name, startedAt, stream, requestHeaders, upstreamHeaders)
+				g.writeUpstreamError(w, r, statusErr, apiKeyID, model, route.Provider.Name, startedAt, stream, r.Header, upstreamHeaders)
 				return
 			}
+			meta.upstreamHeaders = upstreamHeaders
 			g.writeResponsesPassthrough(w, r, upstream, cancelPass, meta)
 			return
 		}
@@ -172,6 +171,7 @@ func (g *Gateway) responses(w http.ResponseWriter, r *http.Request) {
 		request := baseRequest
 		request.Model = route.UpstreamModel
 		request.RawBody = body
+		request.ClientHeaders = clientHeaders
 
 		if stream {
 			streamCtx, cancelStream := context.WithCancel(r.Context())
@@ -182,9 +182,10 @@ func (g *Gateway) responses(w http.ResponseWriter, r *http.Request) {
 					lastErr = err
 					continue
 				}
-				g.writeUpstreamError(w, r, err, apiKeyID, model, route.Provider.Name, startedAt, true, requestHeaders, upstreamHeaders)
+				g.writeUpstreamError(w, r, err, apiKeyID, model, route.Provider.Name, startedAt, true, r.Header, upstreamHeaders)
 				return
 			}
+			meta.upstreamHeaders = upstreamHeaders
 			g.writeResponsesStream(w, r, upstream, cancelStream, rawBody, custom, meta)
 			return
 		}
@@ -195,7 +196,7 @@ func (g *Gateway) responses(w http.ResponseWriter, r *http.Request) {
 				lastErr = err
 				continue
 			}
-			g.writeUpstreamError(w, r, err, apiKeyID, model, route.Provider.Name, startedAt, false, requestHeaders, upstreamHeaders)
+			g.writeUpstreamError(w, r, err, apiKeyID, model, route.Provider.Name, startedAt, false, r.Header, upstreamHeaders)
 			return
 		}
 
@@ -221,11 +222,11 @@ func (g *Gateway) responses(w http.ResponseWriter, r *http.Request) {
 			CompletionTokens: usage.output,
 			TotalTokens:      usage.total,
 		}
-		g.recordAI(requestID, apiKeyID, model, route.Provider.Name, recordUsage, startedAt, http.StatusOK, false, nil, requestHeaders, upstreamHeaders)
+		g.recordAI(requestID, apiKeyID, model, route.Provider.Name, recordUsage, startedAt, http.StatusOK, false, nil, r.Header, upstreamHeaders)
 		return
 	}
 
-	g.writeFinalError(w, r, lastErr, apiKeyID, model, startedAt, stream, requestHeaders, upstreamHeaders)
+	g.writeFinalError(w, r, lastErr, apiKeyID, model, startedAt, stream, r.Header, upstreamHeaders)
 }
 
 // ------------------------------------------------------------------ request
@@ -564,8 +565,8 @@ type responsesMeta struct {
 	model           string
 	provider        string
 	startedAt       time.Time
-	requestHeaders  *string
-	upstreamHeaders *string
+	requestHeaders  http.Header
+	upstreamHeaders map[string]string
 	stream          bool
 }
 
@@ -890,7 +891,7 @@ readLoop:
 		n, readErr := upstream.Body.Read(buffer)
 		if n > 0 {
 			timer.Reset(idle)
-			parser.Push(string(buffer[:n]))
+			parser.PushBytes(buffer[:n])
 			if doneFlag.Load() {
 				break readLoop
 			}
@@ -1071,7 +1072,7 @@ func (g *Gateway) writeResponsesPassthrough(w http.ResponseWriter, r *http.Reque
 	flusher, _ := w.(http.Flusher)
 	streamDone := false
 	streamFailed := false
-	parser := util.NewSSEParser(func(event util.SSEEvent) {
+	parser := util.NewFilteredSSEParser(func(event util.SSEEvent) {
 		if event.Data == "[DONE]" {
 			streamDone = true
 			return
@@ -1109,6 +1110,13 @@ func (g *Gateway) writeResponsesPassthrough(w http.ResponseWriter, r *http.Reque
 		promptTokens = usage.InputTokens
 		completionTokens = usage.OutputTokens
 		totalTokens = usage.TotalTokens
+	}, func(raw []byte) bool {
+		// Output deltas dominate a Responses stream but carry none of the
+		// lifecycle/usage fields this handler records.
+		return bytes.Contains(raw, responsesDoneMarker) ||
+			bytes.Contains(raw, responsesCompletedMarker) ||
+			bytes.Contains(raw, responsesFailedMarker) ||
+			bytes.Contains(raw, responsesUsageMarker)
 	})
 
 	idle := time.Duration(g.cfg.StreamIdleTimeoutMs) * time.Millisecond
@@ -1135,7 +1143,7 @@ func (g *Gateway) writeResponsesPassthrough(w http.ResponseWriter, r *http.Reque
 			if flusher != nil {
 				flusher.Flush()
 			}
-			parser.Push(string(buffer[:n]))
+			parser.PushBytes(buffer[:n])
 			if streamDone {
 				if streamFailed {
 					status = http.StatusBadGateway

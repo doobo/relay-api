@@ -3,27 +3,52 @@
 package middleware
 
 import (
+	"sort"
 	"sync"
 	"time"
 )
 
-// rateWindow is the sliding window width (one minute, i.e. RPM).
-const rateWindow = time.Minute
+const (
+	// rateWindow is the sliding window width (one minute, i.e. RPM).
+	rateWindow = time.Minute
+	// rateShardCount spreads keys across independent locks. A single global
+	// mutex made every authenticated request contend on the same cache line.
+	rateShardCount = 64
+)
 
-// RateLimiter is an in-memory sliding-window limiter, single-process by design
-// (port of middleware/rate-limit.ts).
-type RateLimiter struct {
+// rateShard is one independently locked slice of the limiter's key space.
+type rateShard struct {
 	mu          sync.Mutex
 	buckets     map[string][]int64 // key -> event timestamps (epoch ms)
 	lastCleanup int64
 }
 
+// RateLimiter is an in-memory sharded sliding-window limiter, single-process by
+// design (port of middleware/rate-limit.ts).
+type RateLimiter struct {
+	shards [rateShardCount]rateShard
+}
+
 // NewRateLimiter returns an empty limiter.
 func NewRateLimiter() *RateLimiter {
-	return &RateLimiter{
-		buckets:     make(map[string][]int64),
-		lastCleanup: time.Now().UnixMilli(),
+	limiter := &RateLimiter{}
+	now := time.Now().UnixMilli()
+	for index := range limiter.shards {
+		limiter.shards[index].buckets = make(map[string][]int64)
+		limiter.shards[index].lastCleanup = now
 	}
+	return limiter
+}
+
+// shardFor maps a key to a shard with FNV-1a. The key is short (an API-key id
+// or a client IP), so hashing in place avoids an extra allocation.
+func (l *RateLimiter) shardFor(key string) *rateShard {
+	hash := uint32(2166136261)
+	for index := 0; index < len(key); index++ {
+		hash ^= uint32(key[index])
+		hash *= 16777619
+	}
+	return &l.shards[hash%rateShardCount]
 }
 
 // Check records an attempt for key and reports whether it is within the limit.
@@ -35,24 +60,29 @@ func (l *RateLimiter) Check(key string, limitPerMinute int) (retryAfterSeconds i
 	}
 	now := time.Now().UnixMilli()
 
-	l.mu.Lock()
-	defer l.mu.Unlock()
-	l.maybeCleanupLocked(now)
+	shard := l.shardFor(key)
+	shard.mu.Lock()
+	defer shard.mu.Unlock()
+	if shard.buckets == nil {
+		shard.buckets = make(map[string][]int64)
+	}
+	shard.maybeCleanupLocked(now)
 
 	windowStart := now - rateWindow.Milliseconds()
-	bucket := l.buckets[key]
-	kept := bucket[:0]
-	for _, ts := range bucket {
-		if ts > windowStart {
-			kept = append(kept, ts)
-		}
+	bucket := shard.buckets[key]
+	// Timestamps are appended in order, so binary search finds the first one
+	// still inside the window without scanning the whole bucket.
+	if start := sort.Search(len(bucket), func(index int) bool {
+		return bucket[index] > windowStart
+	}); start > 0 {
+		bucket = bucket[start:]
 	}
 
-	if len(kept) >= limitPerMinute {
-		l.buckets[key] = kept
+	if len(bucket) >= limitPerMinute {
+		shard.buckets[key] = bucket
 		retry := 60
-		if len(kept) > 0 {
-			retry = int((rateWindow.Milliseconds() - (now - kept[0]) + 999) / 1000)
+		if len(bucket) > 0 {
+			retry = int((rateWindow.Milliseconds() - (now - bucket[0]) + 999) / 1000)
 			if retry < 1 {
 				retry = 1
 			}
@@ -60,27 +90,28 @@ func (l *RateLimiter) Check(key string, limitPerMinute int) (retryAfterSeconds i
 		return retry, false
 	}
 
-	l.buckets[key] = append(kept, now)
+	shard.buckets[key] = append(bucket, now)
 	return 0, true
 }
 
 // Reset drops a key's history. Used where a bucket tracks failures: a
 // successful login clears the client's failure count.
 func (l *RateLimiter) Reset(key string) {
-	l.mu.Lock()
-	defer l.mu.Unlock()
-	delete(l.buckets, key)
+	shard := l.shardFor(key)
+	shard.mu.Lock()
+	delete(shard.buckets, key)
+	shard.mu.Unlock()
 }
 
-// maybeCleanupLocked drops idle buckets; caller holds the mutex.
-func (l *RateLimiter) maybeCleanupLocked(now int64) {
-	if now-l.lastCleanup < rateWindow.Milliseconds() {
+// maybeCleanupLocked drops idle buckets; caller holds the shard mutex.
+func (s *rateShard) maybeCleanupLocked(now int64) {
+	if now-s.lastCleanup < rateWindow.Milliseconds() {
 		return
 	}
-	l.lastCleanup = now
-	for key, bucket := range l.buckets {
+	s.lastCleanup = now
+	for key, bucket := range s.buckets {
 		if len(bucket) == 0 || now-bucket[len(bucket)-1] > 2*rateWindow.Milliseconds() {
-			delete(l.buckets, key)
+			delete(s.buckets, key)
 		}
 	}
 }

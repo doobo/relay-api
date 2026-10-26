@@ -1,6 +1,13 @@
 package util
 
-import "strings"
+import "bytes"
+
+var (
+	lfSeparator   = []byte("\n\n")
+	crlfSeparator = []byte("\r\n\r\n")
+	eventField    = []byte("event")
+	dataField     = []byte("data")
+)
 
 // SSEEvent is one parsed server-sent event.
 type SSEEvent struct {
@@ -8,12 +15,17 @@ type SSEEvent struct {
 	Data  string
 }
 
-// SSEParser incrementally parses server-sent events from arbitrary text chunks
+// SSEParser incrementally parses server-sent events from arbitrary byte chunks
 // (port of utils/sse.ts). Parsed events are delivered to the handler as they
-// complete.
+// complete. The internal buffer is byte-based so the streaming hot path does
+// not allocate a string for every upstream read.
 type SSEParser struct {
-	buffer  string
+	buffer  []byte
 	onEvent func(SSEEvent)
+	// keep, when set, filters raw events before line parsing. Callers that only
+	// care about a few event types (chat usage, Responses completion) skip the
+	// parsing and string allocation for every other chunk.
+	keep func([]byte) bool
 }
 
 // NewSSEParser creates a parser delivering complete events to onEvent.
@@ -21,37 +33,57 @@ func NewSSEParser(onEvent func(SSEEvent)) *SSEParser {
 	return &SSEParser{onEvent: onEvent}
 }
 
+// NewFilteredSSEParser creates a parser that only decodes events whose raw
+// bytes satisfy keep. It avoids per-event parsing for chunks of no interest.
+func NewFilteredSSEParser(onEvent func(SSEEvent), keep func([]byte) bool) *SSEParser {
+	return &SSEParser{onEvent: onEvent, keep: keep}
+}
+
 // Push feeds a raw text chunk; any complete events are emitted immediately.
 func (p *SSEParser) Push(text string) {
-	p.buffer += text
+	p.PushBytes([]byte(text))
+}
+
+// PushBytes feeds a raw byte chunk; any complete events are emitted
+// immediately. The chunk is not retained after the call.
+func (p *SSEParser) PushBytes(chunk []byte) {
+	p.buffer = append(p.buffer, chunk...)
+	consumed := 0
 	for {
-		index, length := findSeparator(p.buffer)
+		index, length := findSeparator(p.buffer[consumed:])
 		if index == -1 {
-			return
+			break
 		}
-		raw := p.buffer[:index]
-		p.buffer = p.buffer[index+length:]
+		raw := p.buffer[consumed : consumed+index]
+		consumed += index + length
+		if p.keep != nil && !p.keep(raw) {
+			continue
+		}
 		if event, ok := parseSSEEvent(raw); ok {
 			p.onEvent(event)
 		}
+	}
+	if consumed > 0 {
+		remaining := copy(p.buffer, p.buffer[consumed:])
+		p.buffer = p.buffer[:remaining]
 	}
 }
 
 // Flush processes a trailing event without a final blank line.
 func (p *SSEParser) Flush() {
-	if strings.TrimSpace(p.buffer) != "" {
+	if len(bytes.TrimSpace(p.buffer)) != 0 && (p.keep == nil || p.keep(p.buffer)) {
 		if event, ok := parseSSEEvent(p.buffer); ok {
 			p.onEvent(event)
 		}
 	}
-	p.buffer = ""
+	p.buffer = p.buffer[:0]
 }
 
 // findSeparator locates the next blank-line event separator, returning its
 // index and length, or -1 when none is present yet.
-func findSeparator(buffer string) (int, int) {
-	lf := strings.Index(buffer, "\n\n")
-	crlf := strings.Index(buffer, "\r\n\r\n")
+func findSeparator(buffer []byte) (int, int) {
+	lf := bytes.Index(buffer, lfSeparator)
+	crlf := bytes.Index(buffer, crlfSeparator)
 	if lf == -1 && crlf == -1 {
 		return -1, 0
 	}
@@ -61,34 +93,48 @@ func findSeparator(buffer string) (int, int) {
 	return lf, 2
 }
 
-func parseSSEEvent(raw string) (SSEEvent, bool) {
+func parseSSEEvent(raw []byte) (SSEEvent, bool) {
 	var (
-		event     string
-		dataLines []string
+		event   string
+		data    []byte
+		hasData bool
 	)
-	for _, line := range strings.Split(raw, "\n") {
-		trimmed := strings.TrimSuffix(line, "\r")
-		if trimmed == "" || strings.HasPrefix(trimmed, ":") {
+	for len(raw) > 0 {
+		line := raw
+		if index := bytes.IndexByte(raw, '\n'); index >= 0 {
+			line = raw[:index]
+			raw = raw[index+1:]
+		} else {
+			raw = nil
+		}
+		if length := len(line); length > 0 && line[length-1] == '\r' {
+			line = line[:length-1]
+		}
+		if len(line) == 0 || line[0] == ':' {
 			continue
 		}
-		field := trimmed
-		value := ""
-		if colon := strings.Index(trimmed, ":"); colon != -1 {
-			field = trimmed[:colon]
-			value = trimmed[colon+1:]
-			if strings.HasPrefix(value, " ") {
+		field := line
+		var value []byte
+		if colon := bytes.IndexByte(line, ':'); colon >= 0 {
+			field = line[:colon]
+			value = line[colon+1:]
+			if len(value) > 0 && value[0] == ' ' {
 				value = value[1:]
 			}
 		}
-		switch field {
-		case "event":
-			event = value
-		case "data":
-			dataLines = append(dataLines, value)
+		switch {
+		case bytes.Equal(field, eventField):
+			event = string(value)
+		case bytes.Equal(field, dataField):
+			if hasData {
+				data = append(data, '\n')
+			}
+			data = append(data, value...)
+			hasData = true
 		}
 	}
-	if len(dataLines) == 0 {
+	if !hasData {
 		return SSEEvent{}, false
 	}
-	return SSEEvent{Event: event, Data: strings.Join(dataLines, "\n")}, true
+	return SSEEvent{Event: event, Data: string(data)}, true
 }

@@ -93,6 +93,72 @@ function limitsSummary(key) {
   ].join(" · ");
 }
 
+/** allowed_models is a JSON array text column; nil/empty means all models. */
+function parseAllowedModels(raw) {
+  if (!raw) return [];
+  try {
+    const parsed = JSON.parse(raw);
+    return Array.isArray(parsed) ? parsed.filter((name) => typeof name === "string") : [];
+  } catch {
+    return [];
+  }
+}
+
+function modelsSummary(key) {
+  const models = parseAllowedModels(key.allowed_models);
+  if (models.length === 0) return "all";
+  if (models.length <= 3) return models.join(", ");
+  return `${models.slice(0, 3).join(", ")} +${models.length - 3}`;
+}
+
+/** Populate the model checklist, keeping selected names that were since deleted. */
+async function fillKeyModelList(selected) {
+  const list = el("keyModelList");
+  list.dataset.ready = "false";
+  list.textContent = "Loading models...";
+  el("keyDialogSubmit").disabled = true;
+  try {
+    const data = await api("/admin/models");
+    const names = data.data.map((model) => model.name);
+    for (const name of selected) {
+      if (!names.includes(name)) names.push(name);
+    }
+    list.innerHTML = "";
+    if (names.length === 0) {
+      list.textContent = "No model aliases configured.";
+    } else {
+      for (const name of names) {
+        const label = document.createElement("label");
+        label.className = "check-row";
+        const input = document.createElement("input");
+        input.type = "checkbox";
+        input.name = "allowedModels";
+        input.value = name;
+        input.checked = selected.includes(name);
+        const text = document.createElement("span");
+        text.textContent = name;
+        label.append(input, text);
+        list.appendChild(label);
+      }
+    }
+    list.dataset.ready = "true";
+  } catch (e) {
+    list.textContent = `Failed to load models: ${e.message}`;
+  } finally {
+    el("keyDialogSubmit").disabled = false;
+    filterKeyModelList(el("keyModelSearch").value);
+  }
+}
+
+/** Hide checklist entries that do not match the filter box. */
+function filterKeyModelList(query) {
+  const needle = (query || "").trim().toLowerCase();
+  for (const item of el("keyModelList").children) {
+    if (!(item instanceof HTMLElement)) continue;
+    item.classList.toggle("hidden", needle !== "" && !item.textContent.toLowerCase().includes(needle));
+  }
+}
+
 export async function loadKeys() {
   try {
     const data = await api("/admin/api-keys");
@@ -103,6 +169,7 @@ export async function loadKeys() {
         k.name,
         k.prefix,
         k.scope,
+        modelsSummary(k),
         k.rate_limit,
         limitsSummary(k),
         k.last_used_at ? fmtTime(k.last_used_at) : "never",
@@ -155,11 +222,13 @@ function openKeyDialog(mode, key) {
     fillLimits(form, key);
   }
   openDialog("keyDialog");
+  fillKeyModelList(key ? parseAllowedModels(key.allowed_models) : []);
 }
 
 export function initKeys() {
   el("keyCreateBtn").onclick = () => openKeyDialog("create");
   el("keyDialogCancel").onclick = () => closeDialog("keyDialog");
+  el("keyModelSearch").oninput = (event) => filterKeyModelList(event.target.value);
 
   el("keyForm").onsubmit = async (event) => {
     event.preventDefault();
@@ -174,6 +243,13 @@ export function initKeys() {
       ...limitsFromForm(form),
     };
     if (mode === "edit") body.enabled = form.elements.enabled.checked;
+    // Only send the list once it loaded; otherwise an unrelated edit would
+    // silently clear an existing restriction or a load error would do so.
+    if (el("keyModelList").dataset.ready === "true") {
+      body.allowedModels = [...form.querySelectorAll('input[name="allowedModels"]:checked')].map(
+        (input) => input.value,
+      );
+    }
 
     try {
       if (mode === "create") {

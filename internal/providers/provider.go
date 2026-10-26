@@ -36,6 +36,10 @@ type Request struct {
 	// RawBytes is the exact buffered client body. ResponsesPassthrough uses it
 	// to avoid re-encoding the JSON, preserving formatting and number text.
 	RawBytes []byte
+	// RawResponse asks an OpenAI-compatible provider to return the upstream
+	// non-streaming body in Result.RawBody and only parse usage. The chat
+	// endpoint uses it so extra upstream fields survive unchanged.
+	RawResponse bool
 	// ClientHeaders are the lowercased client request headers, available to
 	// custom provider headers through ${name}.
 	ClientHeaders map[string]string
@@ -83,6 +87,9 @@ type Result struct {
 	FinishReason *string
 	Usage        *Usage
 	Headers      map[string]string
+	// RawBody is the untouched upstream body when the provider was asked for a
+	// raw response. The chat handler writes it verbatim.
+	RawBody []byte
 }
 
 // Provider is one upstream adapter.

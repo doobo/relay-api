@@ -831,7 +831,7 @@ func (p *Responses) ChatStream(ctx context.Context, request Request) (*http.Resp
 		for {
 			n, err := upstream.Body.Read(buffer)
 			if n > 0 {
-				parser.Push(string(buffer[:n]))
+				parser.PushBytes(buffer[:n])
 			}
 			if err != nil {
 				break

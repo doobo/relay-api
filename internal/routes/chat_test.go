@@ -96,6 +96,14 @@ func TestGateway(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("create api key: %v", err)
 	}
+	restrictedKey := "sk-restricted-key-123456"
+	allowedModels := `["m"]`
+	if _, err := db.CreateAPIKey(db.NewAPIKey{
+		Name: "restricted", Prefix: restrictedKey[:8], KeyHash: util.SHA256Hex(restrictedKey),
+		Scope: "both", RateLimit: 10000, AllowedModels: &allowedModels,
+	}); err != nil {
+		t.Fatalf("create restricted api key: %v", err)
+	}
 
 	cfg := config.Load()
 	gw := NewGateway(cfg, router.NewResolver(secrets))
@@ -138,6 +146,9 @@ func TestGateway(t *testing.T) {
 		}
 		if parsed.Usage.TotalTokens != 5 {
 			t.Fatalf("usage not forwarded: %s", recorder.Body.String())
+		}
+		if !strings.Contains(recorder.Body.String(), `"system_fingerprint":"fp_test"`) {
+			t.Fatalf("extra upstream field dropped: %s", recorder.Body.String())
 		}
 	})
 
@@ -304,6 +315,42 @@ func TestGateway(t *testing.T) {
 		}
 	})
 
+	t.Run("allowed models restrict use and discovery", func(t *testing.T) {
+		post := func(model string) *httptest.ResponseRecorder {
+			body := `{"model":"` + model + `","messages":[{"role":"user","content":"hi"}]}`
+			request := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(body))
+			request.Header.Set("Authorization", "Bearer "+restrictedKey)
+			request.Header.Set("content-type", "application/json")
+			recorder := httptest.NewRecorder()
+			handler.ServeHTTP(recorder, request)
+			return recorder
+		}
+
+		denied := post("claude")
+		if denied.Code != http.StatusForbidden || !strings.Contains(denied.Body.String(), "model_not_allowed") {
+			t.Fatalf("disallowed model status = %d, body = %s", denied.Code, denied.Body.String())
+		}
+		if allowed := post("m"); allowed.Code != http.StatusOK {
+			t.Fatalf("allowed model status = %d, body = %s", allowed.Code, allowed.Body.String())
+		}
+
+		request := httptest.NewRequest(http.MethodGet, "/v1/models", nil)
+		request.Header.Set("Authorization", "Bearer "+restrictedKey)
+		recorder := httptest.NewRecorder()
+		handler.ServeHTTP(recorder, request)
+		var listed struct {
+			Data []struct {
+				ID string `json:"id"`
+			} `json:"data"`
+		}
+		if err := json.Unmarshal(recorder.Body.Bytes(), &listed); err != nil {
+			t.Fatalf("decode models: %v", err)
+		}
+		if len(listed.Data) != 1 || listed.Data[0].ID != "m" {
+			t.Fatalf("unexpected model list: %+v", listed.Data)
+		}
+	})
+
 	t.Run("missing api key", func(t *testing.T) {
 		request := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(`{"model":"m","messages":[]}`))
 		recorder := httptest.NewRecorder()
@@ -369,7 +416,8 @@ func healthyUpstream(w http.ResponseWriter, r *http.Request) {
 				"message":       map[string]any{"role": "assistant", "content": "hello"},
 				"finish_reason": "stop",
 			}},
-			"usage": map[string]any{"prompt_tokens": 3, "completion_tokens": 2, "total_tokens": 5},
+			"usage":              map[string]any{"prompt_tokens": 3, "completion_tokens": 2, "total_tokens": 5},
+			"system_fingerprint": "fp_test",
 		})
 	case strings.HasSuffix(r.URL.Path, "/responses"):
 		var body map[string]any

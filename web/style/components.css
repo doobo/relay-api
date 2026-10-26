@@ -245,6 +245,18 @@ dialog select:focus {
   gap: 10px;
 }
 
+/* Scrollable multi-select list for API-key model restrictions. */
+.model-checklist {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 4px 12px;
+  max-height: 180px;
+  overflow-y: auto;
+  padding: 8px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+}
+
 /* Grouped fields (e.g. the quota limits) with their own caption. */
 dialog fieldset {
   display: grid;
@@ -642,7 +654,8 @@ dialog h4 {
     gap: 2px;
   }
 
-  .field-grid {
+  .field-grid,
+  .model-checklist {
     grid-template-columns: 1fr;
   }
 

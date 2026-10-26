@@ -1,6 +1,7 @@
 package routes
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -17,6 +18,8 @@ import (
 	"relay-api/internal/router"
 	"relay-api/internal/util"
 )
+
+var chatUsageMarker = []byte(`"usage"`)
 
 // chat handles POST /v1/chat/completions: it resolves the alias, tries each
 // route in order (failover on timeout/network/408/429/5xx) and forwards the
@@ -71,31 +74,20 @@ func (g *Gateway) chat(w http.ResponseWriter, r *http.Request) {
 		apiKeyID = auth.Key.ID
 	}
 
-	clientHeaders := map[string]string{}
-	for key, values := range r.Header {
-		if len(values) > 0 {
-			clientHeaders[strings.ToLower(key)] = values[0]
-		}
-	}
-
-	var requestHeaders *string
-	if g.cfg.UsageHeaderSnapshots {
-		requestHeaders = snapshotHTTPHeaders(r.Header)
-	}
-	var upstreamHeaders *string
+	var clientHeaders map[string]string
+	var upstreamHeaders map[string]string
 
 	providerRequest := providers.Request{
-		Model:         routes[0].UpstreamModel,
-		Stream:        stream,
-		Temperature:   temperature,
-		MaxTokens:     maxTokens,
-		RawBody:       rawBody,
-		ClientHeaders: clientHeaders,
-		Session:       middleware.AISessionFrom(r.Context()),
+		Model:       routes[0].UpstreamModel,
+		Stream:      stream,
+		Temperature: temperature,
+		MaxTokens:   maxTokens,
+		RawBody:     rawBody,
+		RawBytes:    middleware.RequestBody(r.Context()),
+		RawResponse: !stream,
+		Session:     middleware.AISessionFrom(r.Context()),
 		OnUpstreamHeaders: func(headers map[string]string) {
-			if g.cfg.UsageHeaderSnapshots {
-				upstreamHeaders = snapshotHeaderMap(headers)
-			}
+			upstreamHeaders = headers
 		},
 	}
 
@@ -111,6 +103,12 @@ func (g *Gateway) chat(w http.ResponseWriter, r *http.Request) {
 		provider := providers.New(providerCfg)
 		request := providerRequest
 		request.Model = route.UpstreamModel
+		if len(providerCfg.Headers) > 0 {
+			if clientHeaders == nil {
+				clientHeaders = clientHeaderMap(r.Header)
+			}
+			request.ClientHeaders = clientHeaders
+		}
 
 		if stream {
 			// The stream gets its own cancelable context so the idle-timeout
@@ -123,7 +121,7 @@ func (g *Gateway) chat(w http.ResponseWriter, r *http.Request) {
 					lastErr = err
 					continue
 				}
-				g.writeUpstreamError(w, r, err, apiKeyID, model, route.Provider.Name, startedAt, true, requestHeaders, upstreamHeaders)
+				g.writeUpstreamError(w, r, err, apiKeyID, model, route.Provider.Name, startedAt, true, r.Header, upstreamHeaders)
 				return
 			}
 			g.writeStream(w, r, upstream, cancelStream, streamMeta{
@@ -132,7 +130,7 @@ func (g *Gateway) chat(w http.ResponseWriter, r *http.Request) {
 				model:           model,
 				provider:        route.Provider.Name,
 				startedAt:       startedAt,
-				requestHeaders:  requestHeaders,
+				requestHeaders:  r.Header,
 				upstreamHeaders: upstreamHeaders,
 			})
 			return
@@ -144,15 +142,15 @@ func (g *Gateway) chat(w http.ResponseWriter, r *http.Request) {
 				lastErr = err
 				continue
 			}
-			g.writeUpstreamError(w, r, err, apiKeyID, model, route.Provider.Name, startedAt, false, requestHeaders, upstreamHeaders)
+			g.writeUpstreamError(w, r, err, apiKeyID, model, route.Provider.Name, startedAt, false, r.Header, upstreamHeaders)
 			return
 		}
 		g.writeCompletion(w, result, requestID)
-		g.recordAI(requestID, apiKeyID, model, route.Provider.Name, result.Usage, startedAt, http.StatusOK, false, nil, requestHeaders, upstreamHeaders)
+		g.recordAI(requestID, apiKeyID, model, route.Provider.Name, result.Usage, startedAt, http.StatusOK, false, nil, r.Header, upstreamHeaders)
 		return
 	}
 
-	g.writeFinalError(w, r, lastErr, apiKeyID, model, startedAt, stream, requestHeaders, upstreamHeaders)
+	g.writeFinalError(w, r, lastErr, apiKeyID, model, startedAt, stream, r.Header, upstreamHeaders)
 }
 
 // shouldFailover reports whether an error is worth trying the next route:
@@ -166,12 +164,21 @@ func shouldFailover(err error) bool {
 }
 
 func (g *Gateway) writeCompletion(w http.ResponseWriter, result *providers.Result, requestID string) {
+	for key, value := range result.Headers {
+		w.Header().Set(key, value)
+	}
+	if len(result.RawBody) > 0 {
+		if w.Header().Get("content-type") == "" {
+			w.Header().Set("content-type", "application/json; charset=utf-8")
+		}
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write(result.RawBody)
+		return
+	}
+
 	usage := result.Usage
 	if usage == nil {
 		usage = &providers.Usage{}
-	}
-	for key, value := range result.Headers {
-		w.Header().Set(key, value)
 	}
 	httperr.WriteJSON(w, http.StatusOK, map[string]any{
 		"id":      result.ID,
@@ -189,7 +196,7 @@ func (g *Gateway) writeCompletion(w http.ResponseWriter, result *providers.Resul
 
 // writeUpstreamError passes a non-retryable upstream error straight through
 // (the client sees the upstream status/message), recording usage.
-func (g *Gateway) writeUpstreamError(w http.ResponseWriter, r *http.Request, err error, apiKeyID int64, model, providerName string, startedAt time.Time, stream bool, requestHeaders, upstreamHeaders *string) {
+func (g *Gateway) writeUpstreamError(w http.ResponseWriter, r *http.Request, err error, apiKeyID int64, model, providerName string, startedAt time.Time, stream bool, requestHeaders http.Header, upstreamHeaders map[string]string) {
 	status := http.StatusBadGateway
 	message := err.Error()
 	var statusErr *util.UpstreamStatusError
@@ -197,21 +204,21 @@ func (g *Gateway) writeUpstreamError(w http.ResponseWriter, r *http.Request, err
 		status = statusErr.Status
 		message = statusErr.Body
 	}
-	errorCopy := message
-	g.recordAI(middleware.RequestID(r.Context()), apiKeyID, model, providerName, nil, startedAt, status, stream, &errorCopy, requestHeaders, upstreamHeaders)
 
 	if statusErr != nil {
 		w.Header().Set("content-type", "application/json")
 		w.Header().Set("X-Request-ID", middleware.RequestID(r.Context()))
 		w.WriteHeader(statusErr.Status)
 		_, _ = io.WriteString(w, statusErr.Body)
-		return
+	} else {
+		httperr.WriteJSON(w, http.StatusBadGateway, httperr.New(message, "upstream_error", "upstream_error"))
 	}
-	httperr.WriteJSON(w, http.StatusBadGateway, httperr.New(message, "upstream_error", "upstream_error"))
+	errorCopy := message
+	g.recordAI(middleware.RequestID(r.Context()), apiKeyID, model, providerName, nil, startedAt, status, stream, &errorCopy, requestHeaders, upstreamHeaders)
 }
 
 // writeFinalError records and reports the failure once every route failed.
-func (g *Gateway) writeFinalError(w http.ResponseWriter, r *http.Request, lastErr error, apiKeyID int64, model string, startedAt time.Time, stream bool, requestHeaders, upstreamHeaders *string) {
+func (g *Gateway) writeFinalError(w http.ResponseWriter, r *http.Request, lastErr error, apiKeyID int64, model string, startedAt time.Time, stream bool, requestHeaders http.Header, upstreamHeaders map[string]string) {
 	requestID := middleware.RequestID(r.Context())
 	status := http.StatusBadGateway
 	code := "upstream_error"
@@ -223,7 +230,6 @@ func (g *Gateway) writeFinalError(w http.ResponseWriter, r *http.Request, lastEr
 	if lastErr != nil {
 		message = lastErr.Error()
 	}
-	g.recordAI(requestID, apiKeyID, model, "", nil, startedAt, status, stream, &message, requestHeaders, upstreamHeaders)
 
 	var statusErr *util.UpstreamStatusError
 	if errors.As(lastErr, &statusErr) {
@@ -231,13 +237,12 @@ func (g *Gateway) writeFinalError(w http.ResponseWriter, r *http.Request, lastEr
 		w.Header().Set("X-Request-ID", requestID)
 		w.WriteHeader(statusErr.Status)
 		_, _ = io.WriteString(w, statusErr.Body)
-		return
-	}
-	if status == http.StatusGatewayTimeout {
+	} else if status == http.StatusGatewayTimeout {
 		httperr.WriteJSON(w, status, httperr.New("Upstream request timed out", "upstream_error", code))
-		return
+	} else {
+		httperr.WriteJSON(w, status, httperr.New(message, "upstream_error", code))
 	}
-	httperr.WriteJSON(w, status, httperr.New(message, "upstream_error", code))
+	g.recordAI(requestID, apiKeyID, model, "", nil, startedAt, status, stream, &message, requestHeaders, upstreamHeaders)
 }
 
 // streamMeta carries what the stream wrapper needs to record usage.
@@ -247,8 +252,8 @@ type streamMeta struct {
 	model           string
 	provider        string
 	startedAt       time.Time
-	requestHeaders  *string
-	upstreamHeaders *string
+	requestHeaders  http.Header
+	upstreamHeaders map[string]string
 }
 
 // writeStream forwards the upstream SSE stream chunk by chunk, enforcing an
@@ -265,12 +270,7 @@ func (g *Gateway) writeStream(w http.ResponseWriter, r *http.Request, upstream *
 	w.WriteHeader(http.StatusOK)
 
 	promptTokens, completionTokens := 0, 0
-	parser := util.NewSSEParser(func(event util.SSEEvent) {
-		// Most chunks carry no usage object; skip the JSON decode unless the
-		// key is present at all.
-		if !strings.Contains(event.Data, `"usage"`) {
-			return
-		}
+	parser := util.NewFilteredSSEParser(func(event util.SSEEvent) {
 		var parsed struct {
 			Usage *struct {
 				PromptTokens     int `json:"prompt_tokens"`
@@ -285,6 +285,10 @@ func (g *Gateway) writeStream(w http.ResponseWriter, r *http.Request, upstream *
 				completionTokens = parsed.Usage.CompletionTokens
 			}
 		}
+	}, func(raw []byte) bool {
+		// Most chunks carry no usage object; skip SSE line parsing and the JSON
+		// decode unless the key is present at all.
+		return bytes.Contains(raw, chatUsageMarker)
 	})
 
 	idle := time.Duration(g.cfg.StreamIdleTimeoutMs) * time.Millisecond
@@ -316,7 +320,7 @@ readLoop:
 			if flusher != nil {
 				flusher.Flush()
 			}
-			parser.Push(string(buffer[:n]))
+			parser.PushBytes(buffer[:n])
 		}
 		if readErr != nil {
 			switch {
@@ -346,7 +350,7 @@ readLoop:
 }
 
 // recordAI writes one usage_logs row for an AI request.
-func (g *Gateway) recordAI(requestID string, apiKeyID int64, model, providerName string, usage *providers.Usage, startedAt time.Time, status int, stream bool, errMsg, requestHeaders, upstreamHeaders *string) {
+func (g *Gateway) recordAI(requestID string, apiKeyID int64, model, providerName string, usage *providers.Usage, startedAt time.Time, status int, stream bool, errMsg *string, requestHeaders http.Header, upstreamHeaders map[string]string) {
 	latency := time.Since(startedAt).Milliseconds()
 	promptTokens, completionTokens := 0, 0
 	if usage != nil {
@@ -360,6 +364,12 @@ func (g *Gateway) recordAI(requestID string, apiKeyID int64, model, providerName
 		providerCopy := providerName
 		providerPtr = &providerCopy
 	}
+	var headerSnapshots func() (*string, *string)
+	if g.cfg.UsageHeaderSnapshots {
+		headerSnapshots = func() (*string, *string) {
+			return snapshotHTTPHeaders(requestHeaders), snapshotHeaderMap(upstreamHeaders)
+		}
+	}
 	db.RecordUsageAsync(db.UsageRecord{
 		RequestID:       requestID,
 		APIKeyID:        &keyID,
@@ -372,9 +382,20 @@ func (g *Gateway) recordAI(requestID string, apiKeyID int64, model, providerName
 		Status:          &status,
 		Stream:          stream,
 		Error:           errMsg,
-		RequestHeaders:  requestHeaders,
-		UpstreamHeaders: upstreamHeaders,
+		HeaderSnapshots: headerSnapshots,
 	})
+}
+
+// clientHeaderMap is built only when a provider actually declares custom
+// headers; most requests never allocate it.
+func clientHeaderMap(header http.Header) map[string]string {
+	out := make(map[string]string, len(header))
+	for key, values := range header {
+		if len(values) > 0 {
+			out[strings.ToLower(key)] = values[0]
+		}
+	}
+	return out
 }
 
 func float64Value(value any) *float64 {

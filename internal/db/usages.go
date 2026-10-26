@@ -26,8 +26,14 @@ type UsageRecord struct {
 	Stream       bool
 	Error        *string
 	// RequestHeaders/UpstreamHeaders are JSON snapshots for the detail view.
+	// Callers that still hold the raw header maps should set HeaderSnapshots
+	// instead so sorting and encoding happen in the batch writer.
 	RequestHeaders  *string
 	UpstreamHeaders *string
+	// HeaderSnapshots lazily builds the two JSON snapshots. The usage writer
+	// invokes it off the request path, and a dropped queue entry skips the
+	// encoding entirely.
+	HeaderSnapshots func() (request, upstream *string)
 }
 
 // usageInsertSQL appends one usage_logs row. The synchronous and asynchronous
@@ -45,12 +51,16 @@ func usageInsertArgs(record UsageRecord) []any {
 	if total == 0 {
 		total = record.InputTokens + record.OutputTokens
 	}
+	requestHeaders, upstreamHeaders := record.RequestHeaders, record.UpstreamHeaders
+	if record.HeaderSnapshots != nil {
+		requestHeaders, upstreamHeaders = record.HeaderSnapshots()
+	}
 	return []any{
 		record.RequestID, nullInt(record.APIKeyID), record.Kind,
 		nullString(record.Model), nullString(record.Provider), nullInt(record.APIConfigID), nullString(record.TargetURL),
 		record.InputTokens, record.OutputTokens, total,
 		nullInt(record.LatencyMs), nullStatus(record.Status), boolToInt(record.Stream), nullString(record.Error),
-		nullString(record.RequestHeaders), nullString(record.UpstreamHeaders),
+		nullString(requestHeaders), nullString(upstreamHeaders),
 		time.Now().UnixMilli(),
 	}
 }
@@ -265,14 +275,20 @@ func (w *usageWriter) run() {
 // logged but not retried, because usage is best-effort telemetry and must never
 // stall the writer.
 func insertUsageBatch(records []UsageRecord) {
+	// Build arguments (including lazy header snapshots) before opening the
+	// transaction so JSON encoding never extends SQLite's write lock.
+	args := make([][]any, len(records))
+	for index := range records {
+		args[index] = usageInsertArgs(records[index])
+	}
 	err := Transaction(func(tx *sql.Tx) error {
 		stmt, err := tx.Prepare(usageInsertSQL)
 		if err != nil {
 			return err
 		}
 		defer stmt.Close()
-		for i := range records {
-			if _, err := stmt.Exec(usageInsertArgs(records[i])...); err != nil {
+		for _, recordArgs := range args {
+			if _, err := stmt.Exec(recordArgs...); err != nil {
 				return err
 			}
 		}

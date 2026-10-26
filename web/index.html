@@ -206,7 +206,7 @@
         <div id="newKeyBanner" class="banner hidden" role="status"></div>
         <div class="table-wrap">
           <table id="keysTable" data-mobile="cards">
-            <thead><tr><th>ID</th><th>Name</th><th>Prefix</th><th>Scope</th><th>RPM</th><th>Limits (req/tok)</th><th>Last Used</th><th></th></tr></thead>
+            <thead><tr><th>ID</th><th>Name</th><th>Prefix</th><th>Scope</th><th>Models</th><th>RPM</th><th>Limits (req/tok)</th><th>Last Used</th><th></th></tr></thead>
             <tbody></tbody>
           </table>
         </div>
@@ -499,6 +499,16 @@
       <label class="check-row hidden" id="keyEnabledField">
         <input type="checkbox" name="enabled"> enabled
       </label>
+
+      <fieldset>
+        <legend>Allowed models (none selected = all models)</legend>
+        <label class="field">
+          <span>Filter</span>
+          <input id="keyModelSearch" type="search" placeholder="Filter model aliases..." autocomplete="off">
+        </label>
+        <div id="keyModelList" class="model-checklist" data-ready="false"></div>
+        <p class="hint">Select one or more model aliases to restrict this key. Selecting none allows every model.</p>
+      </fieldset>
 
       <fieldset>
         <legend>Quotas (0 = unlimited)</legend>

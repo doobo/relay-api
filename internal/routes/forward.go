@@ -67,6 +67,12 @@ func (h *ForwardRoutes) handle(w http.ResponseWriter, r *http.Request) {
 
 	var targetURL *string
 	var upstreamHeaders map[string]string
+	var headerSnapshots func() (*string, *string)
+	if h.cfg.UsageHeaderSnapshots {
+		headerSnapshots = func() (*string, *string) {
+			return snapshotHTTPHeaders(r.Header), snapshotHeaderMap(upstreamHeaders)
+		}
+	}
 	record := func(status int, errMsg *string) {
 		var keyPtr *int64
 		if auth != nil {
@@ -75,11 +81,6 @@ func (h *ForwardRoutes) handle(w http.ResponseWriter, r *http.Request) {
 		}
 		configID := apiConfig.ID
 		latency := time.Since(startedAt).Milliseconds()
-		var requestHeaders, upstreamSnapshot *string
-		if h.cfg.UsageHeaderSnapshots {
-			requestHeaders = snapshotHTTPHeaders(r.Header)
-			upstreamSnapshot = snapshotHeaderMap(upstreamHeaders)
-		}
 		db.RecordUsageAsync(db.UsageRecord{
 			RequestID:       requestID,
 			APIKeyID:        keyPtr,
@@ -89,8 +90,7 @@ func (h *ForwardRoutes) handle(w http.ResponseWriter, r *http.Request) {
 			LatencyMs:       &latency,
 			Status:          &status,
 			Error:           errMsg,
-			RequestHeaders:  requestHeaders,
-			UpstreamHeaders: upstreamSnapshot,
+			HeaderSnapshots: headerSnapshots,
 		})
 	}
 
@@ -176,8 +176,8 @@ func (h *ForwardRoutes) handle(w http.ResponseWriter, r *http.Request) {
 		upstreamBody := util.RenderTemplate(requestTemplate, templateContext)
 		if unresolved := util.FindUnresolved(requestTemplate, templateContext); len(unresolved) > 0 {
 			message := "Request template has unresolved placeholders: " + strings.Join(unresolved, ", ")
-			record(http.StatusBadRequest, &message)
 			invalidRequest(w, message)
+			record(http.StatusBadRequest, &message)
 			return
 		}
 		if method != http.MethodGet && method != http.MethodHead && upstreamBody != nil {
@@ -209,12 +209,12 @@ func (h *ForwardRoutes) handle(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		message := err.Error()
 		if errors.Is(err, util.ErrUpstreamTimeout) {
-			record(http.StatusGatewayTimeout, &message)
 			httperr.Write(w, http.StatusGatewayTimeout, "Upstream request timed out", "upstream_error", "upstream_timeout")
+			record(http.StatusGatewayTimeout, &message)
 			return
 		}
-		record(http.StatusBadGateway, &message)
 		httperr.Write(w, http.StatusBadGateway, message, "upstream_error", "upstream_error")
+		record(http.StatusBadGateway, &message)
 		return
 	}
 	defer response.Body.Close()
@@ -224,22 +224,22 @@ func (h *ForwardRoutes) handle(w http.ResponseWriter, r *http.Request) {
 		data, err := io.ReadAll(response.Body)
 		if err != nil {
 			message := err.Error()
-			record(http.StatusBadGateway, &message)
 			httperr.Write(w, http.StatusBadGateway, message, "upstream_error", "upstream_error")
+			record(http.StatusBadGateway, &message)
 			return
 		}
 		var upstreamJSON any
 		if err := json.Unmarshal(data, &upstreamJSON); err != nil {
-			record(http.StatusBadGateway, stringPtr("Response template configured but upstream returned non-JSON"))
 			httperr.Write(w, http.StatusBadGateway, "Upstream returned non-JSON response but response template is configured", "upstream_error", "upstream_error")
+			record(http.StatusBadGateway, stringPtr("Response template configured but upstream returned non-JSON"))
 			return
 		}
 		bodyContext := map[string]any{"data": upstreamJSON}
 		rendered := util.RenderTemplate(responseTemplate, bodyContext)
 		if unresolved := util.FindUnresolved(responseTemplate, bodyContext); len(unresolved) > 0 {
 			message := "Response template has unresolved placeholders: " + strings.Join(unresolved, ", ")
-			record(http.StatusBadGateway, &message)
 			httperr.Write(w, http.StatusBadGateway, message, "upstream_error", "upstream_error")
+			record(http.StatusBadGateway, &message)
 			return
 		}
 		encoded, err := json.Marshal(rendered)

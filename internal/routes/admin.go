@@ -791,16 +791,17 @@ func (h *AdminResources) apiKeyByID(w http.ResponseWriter, r *http.Request) {
 
 func (h *AdminResources) updateAPIKey(w http.ResponseWriter, r *http.Request, id int64) {
 	var body struct {
-		Name                *string `json:"name"`
-		Scope               *string `json:"scope"`
-		RateLimit           *int    `json:"rateLimit"`
-		Enabled             *bool   `json:"enabled"`
-		DailyRequestLimit   *int    `json:"dailyRequestLimit"`
-		DailyTokenLimit     *int    `json:"dailyTokenLimit"`
-		WeeklyRequestLimit  *int    `json:"weeklyRequestLimit"`
-		WeeklyTokenLimit    *int    `json:"weeklyTokenLimit"`
-		MonthlyRequestLimit *int    `json:"monthlyRequestLimit"`
-		MonthlyTokenLimit   *int    `json:"monthlyTokenLimit"`
+		Name                *string   `json:"name"`
+		Scope               *string   `json:"scope"`
+		AllowedModels       *[]string `json:"allowedModels"`
+		RateLimit           *int      `json:"rateLimit"`
+		Enabled             *bool     `json:"enabled"`
+		DailyRequestLimit   *int      `json:"dailyRequestLimit"`
+		DailyTokenLimit     *int      `json:"dailyTokenLimit"`
+		WeeklyRequestLimit  *int      `json:"weeklyRequestLimit"`
+		WeeklyTokenLimit    *int      `json:"weeklyTokenLimit"`
+		MonthlyRequestLimit *int      `json:"monthlyRequestLimit"`
+		MonthlyTokenLimit   *int      `json:"monthlyTokenLimit"`
 	}
 	if _, ok := decodeBody(w, r, &body); !ok {
 		return
@@ -817,9 +818,19 @@ func (h *AdminResources) updateAPIKey(w http.ResponseWriter, r *http.Request, id
 		invalidRequest(w, "rateLimit must be positive")
 		return
 	}
+	// nil keeps the current list; an empty slice clears it (all models allowed).
+	var allowedModels *string
+	if body.AllowedModels != nil {
+		allowedModels = jsonStringSlice(*body.AllowedModels)
+		if allowedModels == nil {
+			empty := ""
+			allowedModels = &empty
+		}
+	}
 	key, err := db.UpdateAPIKey(id, db.APIKeyPatch{
 		Name:                body.Name,
 		Scope:               body.Scope,
+		AllowedModels:       allowedModels,
 		RateLimit:           body.RateLimit,
 		Enabled:             body.Enabled,
 		DailyRequestLimit:   body.DailyRequestLimit,
