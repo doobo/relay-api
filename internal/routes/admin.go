@@ -1552,6 +1552,18 @@ func (h *AdminResources) createModelRoute(w http.ResponseWriter, r *http.Request
 		invalidRequest(w, "Provider "+strconv.FormatInt(body.ProviderID, 10)+" does not exist")
 		return
 	}
+	// A failover route belongs to an existing model alias. Allowing a route for
+	// an unknown name would create a callable alias that never shows up in the
+	// models list and therefore can never be disabled there.
+	alias, err := db.FindModelByName(body.ModelName, 0)
+	if err != nil {
+		internalError(w, "check model alias", err)
+		return
+	}
+	if alias == nil {
+		invalidRequest(w, "Model alias '"+body.ModelName+"' does not exist")
+		return
+	}
 	route, err := db.CreateModelRoute(db.NewModelRoute{
 		ModelName:     body.ModelName,
 		ProviderID:    body.ProviderID,

@@ -69,6 +69,9 @@ func TestAdminModelRoutes(t *testing.T) {
 	if err != nil {
 		t.Fatalf("create provider: %v", err)
 	}
+	if _, err := db.CreateModel("gpt-4o", provider.ID, "gpt-4o-2024", true, 100); err != nil {
+		t.Fatalf("create model: %v", err)
+	}
 
 	recorder := harness.call(t, http.MethodPost, "/admin/model-routes",
 		`{"modelName":"gpt-4o","providerId":`+itoa(provider.ID)+`,"upstreamModel":"gpt-4o-2024"}`)
@@ -83,7 +86,15 @@ func TestAdminModelRoutes(t *testing.T) {
 
 	t.Run("unknown provider is rejected", func(t *testing.T) {
 		recorder := harness.call(t, http.MethodPost, "/admin/model-routes",
-			`{"modelName":"x","providerId":9999,"upstreamModel":"y"}`)
+			`{"modelName":"gpt-4o","providerId":9999,"upstreamModel":"y"}`)
+		if recorder.Code != http.StatusBadRequest {
+			t.Fatalf("status = %d, body = %s", recorder.Code, recorder.Body.String())
+		}
+	})
+
+	t.Run("unknown model alias is rejected", func(t *testing.T) {
+		recorder := harness.call(t, http.MethodPost, "/admin/model-routes",
+			`{"modelName":"no-such-model","providerId":`+itoa(provider.ID)+`,"upstreamModel":"y"}`)
 		if recorder.Code != http.StatusBadRequest {
 			t.Fatalf("status = %d, body = %s", recorder.Code, recorder.Body.String())
 		}

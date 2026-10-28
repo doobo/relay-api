@@ -322,10 +322,23 @@ func UpdateModel(id int64, patch ModelPatch) (*ModelRow, error) {
 	if patch.Priority != nil {
 		priority = *patch.Priority
 	}
-	_, err = Get().Exec(
-		`UPDATE models SET name = ?, provider_id = ?, upstream_model = ?, enabled = ?, priority = ? WHERE id = ?`,
-		name, providerID, upstreamModel, boolToInt(enabled), priority, id,
-	)
+	err = Transaction(func(tx *sql.Tx) error {
+		if _, err := tx.Exec(
+			`UPDATE models SET name = ?, provider_id = ?, upstream_model = ?, enabled = ?, priority = ? WHERE id = ?`,
+			name, providerID, upstreamModel, boolToInt(enabled), priority, id,
+		); err != nil {
+			return err
+		}
+		// Keep failover routes attached across a rename. Without this the old
+		// name would keep routing (an orphan model_routes row no longer matches
+		// any models row) while the renamed alias silently lost its routes.
+		if name != existing.Name {
+			if _, err := tx.Exec(`UPDATE model_routes SET model_name = ? WHERE model_name = ?`, name, existing.Name); err != nil {
+				return err
+			}
+		}
+		return nil
+	})
 	if err != nil {
 		return nil, err
 	}
@@ -333,17 +346,36 @@ func UpdateModel(id int64, patch ModelPatch) (*ModelRow, error) {
 	return GetModel(id)
 }
 
-// DeleteModel removes an alias. Reports whether a row was removed.
+// DeleteModel removes an alias together with its failover routes, so no
+// orphaned model_routes row can keep the name resolvable. Reports whether a row
+// was removed.
 func DeleteModel(id int64) (bool, error) {
-	result, err := Get().Exec(`DELETE FROM models WHERE id = ?`, id)
+	existing, err := GetModel(id)
 	if err != nil {
 		return false, err
 	}
-	affected, err := result.RowsAffected()
+	if existing == nil {
+		return false, nil
+	}
+	affected := int64(0)
+	err = Transaction(func(tx *sql.Tx) error {
+		if _, err := tx.Exec(`DELETE FROM model_routes WHERE model_name = ?`, existing.Name); err != nil {
+			return err
+		}
+		result, err := tx.Exec(`DELETE FROM models WHERE id = ?`, id)
+		if err != nil {
+			return err
+		}
+		affected, err = result.RowsAffected()
+		return err
+	})
+	if err != nil {
+		return false, err
+	}
 	if affected > 0 {
 		invalidateAIResourceCache()
 	}
-	return affected > 0, err
+	return affected > 0, nil
 }
 
 // ------------------------------------------------------------------ api keys

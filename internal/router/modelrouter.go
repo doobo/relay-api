@@ -114,6 +114,20 @@ func (r *Resolver) Resolve(modelName string) ([]Route, error) {
 
 // resolveUncached reads the route and provider rows for one alias.
 func (r *Resolver) resolveUncached(modelName string) ([]Route, error) {
+	// The models row is the alias registry and the enable/disable switch;
+	// model_routes only supplies optional failover targets for that alias. The
+	// alias is therefore checked first: a model that is disabled (or deleted)
+	// must stop resolving even when model_routes rows still reference it,
+	// otherwise disabling or deleting a model in the admin UI would leave it
+	// callable through /v1.
+	model, err := db.GetModelByName(modelName)
+	if err != nil {
+		return nil, err
+	}
+	if model == nil {
+		return nil, ErrModelNotFound
+	}
+
 	routes, err := db.ListModelRoutesFor(modelName)
 	if err != nil {
 		return nil, err
@@ -138,13 +152,6 @@ func (r *Resolver) resolveUncached(modelName string) ([]Route, error) {
 		return out, nil
 	}
 
-	model, err := db.GetModelByName(modelName)
-	if err != nil {
-		return nil, err
-	}
-	if model == nil {
-		return nil, ErrModelNotFound
-	}
 	provider, err := db.GetProvider(model.ProviderID)
 	if err != nil {
 		return nil, err
