@@ -373,6 +373,13 @@ func TestGateway(t *testing.T) {
 		if count == 0 {
 			t.Fatal("expected at least one recorded AI usage row")
 		}
+		today, err := db.TodayStatsSince()
+		if err != nil {
+			t.Fatalf("today stats: %v", err)
+		}
+		if today.Requests == 0 {
+			t.Fatal("live dashboard counters did not observe the async usage rows")
+		}
 	})
 }
 

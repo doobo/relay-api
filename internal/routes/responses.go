@@ -120,10 +120,17 @@ func (g *Gateway) responses(w http.ResponseWriter, r *http.Request) {
 
 	var lastErr error
 	for _, route := range routes {
-		providerCfg, err := g.resolver.ProviderConfig(route, g.cfg.RequestTimeoutMs)
+		providerCfg, err := g.resolver.ProviderConfig(route, g.cfg.RequestTimeoutMs, g.cfg.UpstreamHeaderTimeoutMs)
 		if err != nil {
 			httperr.Write(w, http.StatusInternalServerError, err.Error(), "internal_error", "provider_key_undecryptable")
 			return
+		}
+		// Checked after the config so a config error cannot leave a half-open
+		// probe unresolved (which would keep the breaker rejecting forever).
+		key := breakerKey(route)
+		if !g.breaker.Allow(key) {
+			lastErr = errCircuitOpen
+			continue
 		}
 		if len(providerCfg.Headers) > 0 && clientHeaders == nil {
 			clientHeaders = clientHeaderMap(r.Header)
@@ -149,27 +156,37 @@ func (g *Gateway) responses(w http.ResponseWriter, r *http.Request) {
 				request.RawBody = loadRawBody()
 			}
 			request.ClientHeaders = clientHeaders
-			upstream, err := providers.ResponsesPassthrough(passCtx, providerCfg, request)
+			// ResponsesPassthrough only reports transport errors, so a non-2xx
+			// is folded into UpstreamStatusError here: that lets the retry loop
+			// treat it like every other adapter while keeping the body for the
+			// final pass-through. A 2xx response is returned untouched.
+			upstream, err := callWithRetry(passCtx, g.cfg.UpstreamMaxRetries, g.retryDelay, func() (*http.Response, error) {
+				response, err := providers.ResponsesPassthrough(passCtx, providerCfg, request)
+				if err != nil {
+					return nil, err
+				}
+				if response.StatusCode >= 200 && response.StatusCode < 300 {
+					return response, nil
+				}
+				body := util.ReadBodyLimited(response, 500)
+				return nil, &util.UpstreamStatusError{Status: response.StatusCode, Body: body}
+			})
 			if err != nil {
 				cancelPass()
 				if shouldFailover(err) {
+					if r.Context().Err() != nil {
+						g.breaker.Success(key)
+						return
+					}
+					g.breaker.Failure(key)
 					lastErr = err
 					continue
 				}
+				g.breaker.Success(key)
 				g.writeUpstreamError(w, r, err, apiKeyID, model, route.Provider.Name, startedAt, stream, r.Header, upstreamHeaders)
 				return
 			}
-			if upstream.StatusCode < 200 || upstream.StatusCode >= 300 {
-				body := util.ReadBodyLimited(upstream, 500)
-				cancelPass()
-				statusErr := &util.UpstreamStatusError{Status: upstream.StatusCode, Body: body}
-				if util.IsFailoverStatus(upstream.StatusCode) {
-					lastErr = statusErr
-					continue
-				}
-				g.writeUpstreamError(w, r, statusErr, apiKeyID, model, route.Provider.Name, startedAt, stream, r.Header, upstreamHeaders)
-				return
-			}
+			g.breaker.Success(key)
 			meta.upstreamHeaders = upstreamHeaders
 			g.writeResponsesPassthrough(w, r, upstream, cancelPass, meta)
 			return
@@ -177,6 +194,7 @@ func (g *Gateway) responses(w http.ResponseWriter, r *http.Request) {
 
 		body, custom, err := ensureChatBody()
 		if err != nil {
+			g.breaker.Success(key)
 			invalidRequest(w, err.Error())
 			return
 		}
@@ -188,30 +206,48 @@ func (g *Gateway) responses(w http.ResponseWriter, r *http.Request) {
 
 		if stream {
 			streamCtx, cancelStream := context.WithCancel(r.Context())
-			upstream, err := provider.ChatStream(streamCtx, request)
+			upstream, err := callWithRetry(streamCtx, g.cfg.UpstreamMaxRetries, g.retryDelay, func() (*http.Response, error) {
+				return provider.ChatStream(streamCtx, request)
+			})
 			if err != nil {
 				cancelStream()
 				if shouldFailover(err) {
+					if r.Context().Err() != nil {
+						g.breaker.Success(key)
+						return
+					}
+					g.breaker.Failure(key)
 					lastErr = err
 					continue
 				}
+				g.breaker.Success(key)
 				g.writeUpstreamError(w, r, err, apiKeyID, model, route.Provider.Name, startedAt, true, r.Header, upstreamHeaders)
 				return
 			}
+			g.breaker.Success(key)
 			meta.upstreamHeaders = upstreamHeaders
 			g.writeResponsesStream(w, r, upstream, cancelStream, rawBody, custom, meta)
 			return
 		}
 
-		result, err := provider.Chat(r.Context(), request)
+		result, err := callWithRetry(r.Context(), g.cfg.UpstreamMaxRetries, g.retryDelay, func() (*providers.Result, error) {
+			return provider.Chat(r.Context(), request)
+		})
 		if err != nil {
 			if shouldFailover(err) {
+				if r.Context().Err() != nil {
+					g.breaker.Success(key)
+					return
+				}
+				g.breaker.Failure(key)
 				lastErr = err
 				continue
 			}
+			g.breaker.Success(key)
 			g.writeUpstreamError(w, r, err, apiKeyID, model, route.Provider.Name, startedAt, false, r.Header, upstreamHeaders)
 			return
 		}
+		g.breaker.Success(key)
 
 		output, usage := buildResponsesOutput(result, custom)
 		responseID := "resp_" + randomResponsesID()

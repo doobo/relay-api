@@ -23,8 +23,10 @@ var (
 
 // readPoolSize is the number of concurrent read-only connections. SQLite WAL
 // lets readers proceed while the single writer is committing, so dashboard and
-// log queries stop queueing behind usage inserts.
-const readPoolSize = 4
+// log queries stop queueing behind usage inserts. Eight connections absorb a
+// handful of concurrent admin tabs without starving auth lookups; readers are
+// cheap in WAL mode.
+const readPoolSize = 8
 
 // Open creates/opens the SQLite database at path, applies the single-process
 // pragmas from the reference (WAL, NORMAL sync, 5s busy timeout, foreign keys)

@@ -2,6 +2,7 @@ package db
 
 import (
 	"database/sql"
+	"runtime"
 	"strings"
 	"time"
 )
@@ -189,20 +190,60 @@ type TodayStats struct {
 }
 
 // TodayStatsSince aggregates usage rows created at/after the local start of
-// the current day.
+// the current day. The counters are maintained in memory by the usage writer;
+// SQLite is only scanned to seed them at startup.
 func TodayStatsSince() (TodayStats, error) {
-	var stats TodayStats
+	if stats, ok := liveTodayStats(); ok {
+		return stats, nil
+	}
+	aggregate, err := queryTodayAggregate()
+	if err != nil {
+		return TodayStats{}, err
+	}
+	return aggregate.stats(), nil
+}
+
+// todayAggregate is the raw counter set needed to seed the live stats. The
+// average is derived from sum/count so it can continue incrementally.
+type todayAggregate struct {
+	Requests     int
+	Tokens       int
+	Errors       int
+	LatencySum   int64
+	LatencyCount int64
+}
+
+// stats converts the raw aggregate into the dashboard shape.
+func (a todayAggregate) stats() TodayStats {
+	stats := TodayStats{Requests: a.Requests, Tokens: a.Tokens, Errors: a.Errors}
+	if a.LatencyCount > 0 {
+		stats.AvgLatencyMs = float64(a.LatencySum) / float64(a.LatencyCount)
+	}
+	return stats
+}
+
+// queryTodayAggregate is the SQLite source of truth used to seed the live
+// counters at startup, and the fallback when they are unavailable.
+func queryTodayAggregate() (todayAggregate, error) {
+	var aggregate todayAggregate
 	err := Read().QueryRow(
 		`SELECT
-			COUNT(*) AS requests,
-			COALESCE(SUM(total_tokens), 0) AS tokens,
-			COALESCE(SUM(CASE WHEN status >= 400 OR status IS NULL THEN 1 ELSE 0 END), 0) AS errors,
-			COALESCE(AVG(latency_ms), 0) AS avg_latency_ms
+			COUNT(*),
+			COALESCE(SUM(total_tokens), 0),
+			COALESCE(SUM(CASE WHEN status >= 400 OR status IS NULL THEN 1 ELSE 0 END), 0),
+			COALESCE(SUM(latency_ms), 0),
+			COUNT(latency_ms)
 		 FROM usage_logs
 		 WHERE created_at >= ?`,
 		StartOfDayMS(time.Now()),
-	).Scan(&stats.Requests, &stats.Tokens, &stats.Errors, &stats.AvgLatencyMs)
-	return stats, err
+	).Scan(
+		&aggregate.Requests,
+		&aggregate.Tokens,
+		&aggregate.Errors,
+		&aggregate.LatencySum,
+		&aggregate.LatencyCount,
+	)
+	return aggregate, err
 }
 
 // ModelStat is one model's counters for the current day.
@@ -212,8 +253,17 @@ type ModelStat struct {
 	Tokens   int
 }
 
-// ModelStatsToday returns today's per-model counters, busiest first.
+// ModelStatsToday returns today's per-model counters, busiest first. Served
+// from the live counters; SQLite is only the startup seed.
 func ModelStatsToday() ([]ModelStat, error) {
+	if stats, ok := liveModelStatsToday(); ok {
+		return stats, nil
+	}
+	return modelStatsTodaySQL()
+}
+
+// modelStatsTodaySQL is the SQLite fallback for ModelStatsToday.
+func modelStatsTodaySQL() ([]ModelStat, error) {
 	rows, err := Read().Query(
 		`SELECT model, COUNT(*) AS requests, COALESCE(SUM(total_tokens), 0) AS tokens
 		 FROM usage_logs
@@ -246,7 +296,16 @@ type ProviderStat struct {
 }
 
 // ProviderStatsToday returns today's per-provider counters, busiest first.
+// Served from the live counters; SQLite is only the startup seed.
 func ProviderStatsToday() ([]ProviderStat, error) {
+	if stats, ok := liveProviderStatsToday(); ok {
+		return stats, nil
+	}
+	return providerStatsTodaySQL()
+}
+
+// providerStatsTodaySQL is the SQLite fallback for ProviderStatsToday.
+func providerStatsTodaySQL() ([]ProviderStat, error) {
 	rows, err := Read().Query(
 		`SELECT provider, COUNT(*) AS requests,
 			COALESCE(SUM(CASE WHEN status >= 400 OR status IS NULL THEN 1 ELSE 0 END), 0) AS errors
@@ -272,19 +331,20 @@ func ProviderStatsToday() ([]ProviderStat, error) {
 	return stats, rows.Err()
 }
 
-// APIConfigStatsFor aggregates one config's all-time request counters.
+// APIConfigStatsFor returns one config's aggregate. It reuses the grouped,
+// briefly cached APIConfigStatsAll result instead of scanning usage_logs again
+// for a single id.
 func APIConfigStatsFor(configID int64) (APIConfigStats, error) {
-	var stats APIConfigStats
-	err := Read().QueryRow(
-		`SELECT COUNT(*) AS requests,
-			COALESCE(SUM(CASE WHEN status >= 400 OR status IS NULL THEN 1 ELSE 0 END), 0) AS errors,
-			COALESCE(AVG(latency_ms), 0) AS avg_latency_ms
-		 FROM usage_logs
-		 WHERE kind = 'api' AND api_config_id = ?`,
-		configID,
-	).Scan(&stats.Requests, &stats.Errors, &stats.AvgLatencyMs)
-	stats.APIConfigID = configID
-	return stats, err
+	stats, err := APIConfigStatsAll()
+	if err != nil {
+		return APIConfigStats{APIConfigID: configID}, err
+	}
+	for _, stat := range stats {
+		if stat.APIConfigID == configID {
+			return stat, nil
+		}
+	}
+	return APIConfigStats{APIConfigID: configID}, nil
 }
 
 // -------------------------------------------------------------- audit logs
@@ -329,21 +389,45 @@ func ListAuditLogs(limit int) ([]AuditLogRow, error) {
 	return logs, rows.Err()
 }
 
+// purgeBatchSize bounds one DELETE so the first cleanup of a years-old table
+// does not hold the single writer for minutes.
+const purgeBatchSize = 10_000
+
 // PurgeOldLogs deletes usage_logs and audit_logs older than retentionDays and
-// reports how many rows each deletion removed.
+// reports how many rows each deletion removed. retentionDays <= 0 disables the
+// purge: 0 means "keep forever", not "delete everything".
 func PurgeOldLogs(retentionDays int) (usage int64, audit int64, err error) {
-	cutoff := time.Now().UnixMilli() - int64(retentionDays)*86_400_000
-	usageResult, err := Get().Exec(`DELETE FROM usage_logs WHERE created_at < ?`, cutoff)
-	if err != nil {
-		return 0, 0, err
+	if retentionDays <= 0 {
+		return 0, 0, nil
 	}
+	cutoff := time.Now().UnixMilli() - int64(retentionDays)*86_400_000
+
+	// Delete usage rows in bounded batches: each batch is its own transaction,
+	// so the writer keeps serving between them and the WAL does not balloon.
+	for {
+		result, err := Get().Exec(
+			`DELETE FROM usage_logs WHERE id IN (
+				SELECT id FROM usage_logs WHERE created_at < ? LIMIT ?
+			)`,
+			cutoff, purgeBatchSize,
+		)
+		if err != nil {
+			return usage, 0, err
+		}
+		deleted, err := result.RowsAffected()
+		if err != nil {
+			return usage, 0, err
+		}
+		usage += deleted
+		if deleted < purgeBatchSize {
+			break
+		}
+		runtime.Gosched()
+	}
+
 	auditResult, err := Get().Exec(`DELETE FROM audit_logs WHERE created_at < ?`, cutoff)
 	if err != nil {
-		return 0, 0, err
-	}
-	usage, err = usageResult.RowsAffected()
-	if err != nil {
-		return 0, 0, err
+		return usage, 0, err
 	}
 	audit, err = auditResult.RowsAffected()
 	return usage, audit, err

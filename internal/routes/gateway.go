@@ -2,11 +2,13 @@ package routes
 
 import (
 	"net/http"
+	"time"
 
 	"relay-api/internal/config"
 	"relay-api/internal/db"
 	"relay-api/internal/httperr"
 	"relay-api/internal/middleware"
+	"relay-api/internal/resilience"
 	"relay-api/internal/router"
 )
 
@@ -14,11 +16,22 @@ import (
 type Gateway struct {
 	cfg      config.Config
 	resolver *router.Resolver
+	// breaker skips a provider for a cooldown after repeated upstream failures,
+	// so a database outage at one gateway is not amplified by every request
+	// (and every retry) still being sent to it.
+	breaker *resilience.Breaker
 }
 
 // NewGateway builds the gateway routes.
 func NewGateway(cfg config.Config, resolver *router.Resolver) *Gateway {
-	return &Gateway{cfg: cfg, resolver: resolver}
+	return &Gateway{
+		cfg:      cfg,
+		resolver: resolver,
+		breaker: resilience.NewBreaker(
+			cfg.UpstreamBreakerThreshold,
+			time.Duration(cfg.UpstreamBreakerCooldownMs)*time.Millisecond,
+		),
+	}
 }
 
 // Register mounts the gateway routes.

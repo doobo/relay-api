@@ -16,3 +16,5 @@
 # 发布包（make release 产物）
 /dist/
 task.md
+.idea/
+*.iml

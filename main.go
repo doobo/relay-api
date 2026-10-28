@@ -23,6 +23,7 @@ import (
 	"relay-api/internal/config"
 	"relay-api/internal/db"
 	"relay-api/internal/httperr"
+	"relay-api/internal/logging"
 	"relay-api/internal/middleware"
 	"relay-api/internal/router"
 	"relay-api/internal/routes"
@@ -36,30 +37,35 @@ var version = "dev"
 
 func main() {
 	cfg := config.Load()
-	setupLogger(cfg.LogLevel)
+	logWriter := setupLogger(cfg.LogLevel)
+	defer func() { _ = logWriter.Close() }()
+
+	// Startup failures must flush the async log buffer before os.Exit, which
+	// does not run deferred calls.
+	fatal := func(message string, args ...any) {
+		slog.Error(message, args...)
+		_ = logWriter.Close()
+		os.Exit(1)
+	}
 
 	database, err := db.Open(cfg.DatabasePath)
 	if err != nil {
-		slog.Error("open database", "path", cfg.DatabasePath, "error", err)
-		os.Exit(1)
+		fatal("open database", "path", cfg.DatabasePath, "error", err)
 	}
 	defer func() { _ = db.Close() }()
 
 	if err := db.Migrate(database); err != nil {
-		slog.Error("migrate database", "error", err)
-		os.Exit(1)
+		fatal("migrate database", "error", err)
 	}
 	slog.Info("SQLite ready", "path", cfg.DatabasePath, "journal_mode", "WAL")
 
 	if err := seedDefaultAdmin(cfg); err != nil {
-		slog.Error("seed default admin", "error", err)
-		os.Exit(1)
+		fatal("seed default admin", "error", err)
 	}
 
 	secrets, err := util.NewSecretBox()
 	if err != nil {
-		slog.Error("load secret encryption key", "error", err)
-		os.Exit(1)
+		fatal("load secret encryption key", "error", err)
 	}
 
 	limiter := middleware.NewRateLimiter()
@@ -137,6 +143,12 @@ func main() {
 		// (STREAM_IDLE_TIMEOUT_MS), not in the server.
 	}
 
+	// Automatic log retention: run once at startup (so frequent restarts cannot
+	// skip the schedule) and then daily at LOG_CLEANUP_TIME.
+	cleanupHour, cleanupMinute := cfg.CleanupHourMinute()
+	stopCleanup := db.StartLogCleanup(cfg.LogRetentionDays, cleanupHour, cleanupMinute)
+	defer stopCleanup()
+
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
@@ -149,8 +161,7 @@ func main() {
 	select {
 	case err := <-errCh:
 		if err != nil && !errors.Is(err, http.ErrServerClosed) {
-			slog.Error("server failed", "error", err)
-			os.Exit(1)
+			fatal("server failed", "error", err)
 		}
 	case <-ctx.Done():
 		slog.Info("shutting down")
@@ -180,8 +191,10 @@ func handleHealth(w http.ResponseWriter, _ *http.Request) {
 	httperr.WriteJSON(w, http.StatusOK, map[string]string{"status": "ok"})
 }
 
-// setupLogger configures the default slog logger for the requested level.
-func setupLogger(level config.LogLevel) {
+// setupLogger configures the default slog logger for the requested level. The
+// text handler writes through a batching async writer, so a slow stdout cannot
+// block the request goroutines that produce the log line.
+func setupLogger(level config.LogLevel) *logging.AsyncWriter {
 	var slogLevel slog.Level
 	switch level {
 	case config.LogDebug:
@@ -193,5 +206,7 @@ func setupLogger(level config.LogLevel) {
 	default:
 		slogLevel = slog.LevelInfo
 	}
-	slog.SetDefault(slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: slogLevel})))
+	writer := logging.NewAsyncWriter(os.Stdout, logging.Options{})
+	slog.SetDefault(slog.New(slog.NewTextHandler(writer, &slog.HandlerOptions{Level: slogLevel})))
+	return writer
 }

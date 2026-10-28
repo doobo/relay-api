@@ -195,8 +195,10 @@ func (p *OpenAI) ChatStream(ctx context.Context, request Request) (*http.Respons
 		Headers: p.headers(request),
 		Body:    bytes.NewReader(payload),
 		// No overall timeout for streams; the caller enforces an idle timeout.
-		TimeoutMs: 0,
-		URL:       targetURL,
+		// The header deadline still bounds an upstream that never responds.
+		TimeoutMs:       0,
+		HeaderTimeoutMs: p.cfg.HeaderTimeoutMs,
+		URL:             targetURL,
 	})
 	if err != nil {
 		return nil, err

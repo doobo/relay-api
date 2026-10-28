@@ -4,6 +4,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"errors"
+	"sync"
 	"time"
 
 	"relay-api/internal/util"
@@ -833,8 +834,49 @@ type APIConfigStats struct {
 	AvgLatencyMs float64
 }
 
-// APIConfigStatsAll aggregates usage_logs per config (kind = api).
+// Config stats are all-time aggregates over every kind='api' row. The grouped
+// scan costs grow with the whole retention window (millions of rows), while the
+// numbers only change as requests arrive, so the result is cached briefly. Both
+// the configs list and the optional /admin/stats breakdown then stop re-running
+// the scan on every page load.
+const configStatsCacheTTL = 60 * time.Second
+
+var (
+	configStatsMu      sync.Mutex
+	configStatsCache   []APIConfigStats
+	configStatsCacheAt time.Time
+)
+
+// resetConfigStatsCache drops the cached aggregates when the database handle
+// changes, so a fresh handle never serves the previous handle's numbers.
+func resetConfigStatsCache() {
+	configStatsMu.Lock()
+	configStatsCache = nil
+	configStatsCacheAt = time.Time{}
+	configStatsMu.Unlock()
+}
+
+// APIConfigStatsAll aggregates usage_logs per config (kind = api), cached for a
+// short interval. The mutex also acts as single-flight: concurrent callers wait
+// for the one running scan and then read its cached result.
 func APIConfigStatsAll() ([]APIConfigStats, error) {
+	configStatsMu.Lock()
+	defer configStatsMu.Unlock()
+	if !configStatsCacheAt.IsZero() && time.Since(configStatsCacheAt) < configStatsCacheTTL {
+		return append([]APIConfigStats(nil), configStatsCache...), nil
+	}
+	stats, err := apiConfigStatsAllSQL()
+	if err != nil {
+		return nil, err
+	}
+	configStatsCache = stats
+	configStatsCacheAt = time.Now()
+	return append([]APIConfigStats(nil), stats...), nil
+}
+
+// apiConfigStatsAllSQL is the uncached grouped scan behind APIConfigStatsAll.
+// idx_usage_config_cover makes it cover the selected columns.
+func apiConfigStatsAllSQL() ([]APIConfigStats, error) {
 	rows, err := Read().Query(
 		`SELECT api_config_id, COUNT(*) AS requests,
 			COALESCE(SUM(CASE WHEN status >= 400 OR status IS NULL THEN 1 ELSE 0 END), 0) AS errors,

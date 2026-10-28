@@ -45,12 +45,9 @@ const usageInsertSQL = `INSERT INTO usage_logs
  VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
 
 // usageInsertArgs renders a record into the placeholder arguments, stamping it
-// with the current time.
-func usageInsertArgs(record UsageRecord) []any {
-	total := record.TotalTokens
-	if total == 0 {
-		total = record.InputTokens + record.OutputTokens
-	}
+// with the batch's createdAt so the log row and its daily rollup agree.
+func usageInsertArgs(record UsageRecord, createdAt int64) []any {
+	total := usageTotal(record)
 	requestHeaders, upstreamHeaders := record.RequestHeaders, record.UpstreamHeaders
 	if record.HeaderSnapshots != nil {
 		requestHeaders, upstreamHeaders = record.HeaderSnapshots()
@@ -61,7 +58,7 @@ func usageInsertArgs(record UsageRecord) []any {
 		record.InputTokens, record.OutputTokens, total,
 		nullInt(record.LatencyMs), nullStatus(record.Status), boolToInt(record.Stream), nullString(record.Error),
 		nullString(requestHeaders), nullString(upstreamHeaders),
-		time.Now().UnixMilli(),
+		createdAt,
 	}
 }
 
@@ -74,8 +71,20 @@ func RecordUsage(record UsageRecord) error {
 }
 
 func insertUsage(record UsageRecord) error {
-	_, err := Get().Exec(usageInsertSQL, usageInsertArgs(record)...)
-	return err
+	now := time.Now()
+	createdAt := now.UnixMilli()
+	if err := Transaction(func(tx *sql.Tx) error {
+		if _, err := tx.Exec(usageInsertSQL, usageInsertArgs(record, createdAt)...); err != nil {
+			return err
+		}
+		// The rollup shares the log row's transaction: a quota read can never
+		// observe usage that was logged but not yet counted (or vice versa).
+		return upsertDailyUsage(tx, []UsageRecord{record}, createdAt)
+	}); err != nil {
+		return err
+	}
+	liveStats.note(record, now)
+	return nil
 }
 
 // noteUsage advances the in-memory quota counters for a record. It runs before
@@ -86,10 +95,7 @@ func noteUsage(record UsageRecord) {
 	if record.APIKeyID == nil {
 		return
 	}
-	total := record.TotalTokens
-	if total == 0 {
-		total = record.InputTokens + record.OutputTokens
-	}
+	total := usageTotal(record)
 	addAPIKeyQuotaUsage(*record.APIKeyID, total)
 }
 
@@ -279,11 +285,13 @@ func (w *usageWriter) run() {
 // logged but not retried, because usage is best-effort telemetry and must never
 // stall the writer.
 func insertUsageBatch(records []UsageRecord) {
+	now := time.Now()
+	createdAt := now.UnixMilli()
 	// Build arguments (including lazy header snapshots) before opening the
 	// transaction so JSON encoding never extends SQLite's write lock.
 	args := make([][]any, len(records))
 	for index := range records {
-		args[index] = usageInsertArgs(records[index])
+		args[index] = usageInsertArgs(records[index], createdAt)
 	}
 	err := Transaction(func(tx *sql.Tx) error {
 		stmt, err := tx.Prepare(usageInsertSQL)
@@ -296,10 +304,14 @@ func insertUsageBatch(records []UsageRecord) {
 				return err
 			}
 		}
-		return nil
+		return upsertDailyUsage(tx, records, createdAt)
 	})
 	if err != nil {
 		slog.Error("record usage batch", "count", len(records), "error", err)
+		return
+	}
+	for _, record := range records {
+		liveStats.note(record, now)
 	}
 }
 
@@ -320,31 +332,12 @@ type QuotaUsage struct {
 	MonthTokens   int
 }
 
-// APIKeyQuotaUsage aggregates one key's usage across the three quota periods in
-// a single indexed scan.
+// APIKeyQuotaUsage returns a key's current day/week/month counters. It reads
+// the per-key daily rollup, not usage_logs, so log retention never shrinks
+// quota usage. Day* is today's persisted usage, which the cached enforcement
+// path uses as the seed for its in-memory today counter.
 func APIKeyQuotaUsage(keyID int64) (QuotaUsage, error) {
-	now := time.Now()
-	day := startOfDayMs(now)
-	week := startOfWeekMs(now)
-	month := startOfMonthMs(now)
-	var usage QuotaUsage
-	err := Read().QueryRow(
-		`SELECT
-			COALESCE(SUM(CASE WHEN created_at >= ? THEN 1 ELSE 0 END), 0),
-			COALESCE(SUM(CASE WHEN created_at >= ? THEN total_tokens ELSE 0 END), 0),
-			COALESCE(SUM(CASE WHEN created_at >= ? THEN 1 ELSE 0 END), 0),
-			COALESCE(SUM(CASE WHEN created_at >= ? THEN total_tokens ELSE 0 END), 0),
-			COALESCE(SUM(CASE WHEN created_at >= ? THEN 1 ELSE 0 END), 0),
-			COALESCE(SUM(CASE WHEN created_at >= ? THEN total_tokens ELSE 0 END), 0)
-		 FROM usage_logs
-		 WHERE api_key_id = ? AND created_at >= ?`,
-		day, day, week, week, month, month, keyID, month,
-	).Scan(
-		&usage.DayRequests, &usage.DayTokens,
-		&usage.WeekRequests, &usage.WeekTokens,
-		&usage.MonthRequests, &usage.MonthTokens,
-	)
-	return usage, err
+	return quotaUsageFromRollup(keyID, time.Now())
 }
 
 // StartOfDayMS returns the start of the local day, in epoch ms.

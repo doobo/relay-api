@@ -50,11 +50,12 @@ func ResponsesPassthrough(ctx context.Context, cfg Config, request Request) (*ht
 	}
 	rawURL, targetURL := cfg.endpoint("/responses")
 	return util.FetchUpstream(ctx, rawURL, util.FetchOptions{
-		Method:    http.MethodPost,
-		Headers:   headers,
-		Body:      bytes.NewReader(payload),
-		TimeoutMs: timeout,
-		URL:       targetURL,
+		Method:          http.MethodPost,
+		Headers:         headers,
+		Body:            bytes.NewReader(payload),
+		TimeoutMs:       timeout,
+		HeaderTimeoutMs: cfg.HeaderTimeoutMs,
+		URL:             targetURL,
 	})
 }
 
@@ -587,11 +588,12 @@ func (p *Responses) ChatStream(ctx context.Context, request Request) (*http.Resp
 	}
 	rawURL, targetURL := p.cfg.endpoint("/responses")
 	upstream, err := util.FetchUpstream(ctx, rawURL, util.FetchOptions{
-		Method:    http.MethodPost,
-		Headers:   p.headers(request),
-		Body:      bytes.NewReader(payload),
-		TimeoutMs: 0,
-		URL:       targetURL,
+		Method:          http.MethodPost,
+		Headers:         p.headers(request),
+		Body:            bytes.NewReader(payload),
+		TimeoutMs:       0,
+		HeaderTimeoutMs: p.cfg.HeaderTimeoutMs,
+		URL:             targetURL,
 	})
 	if err != nil {
 		return nil, err

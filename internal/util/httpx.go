@@ -27,14 +27,17 @@ var ErrUpstreamTimeout = errors.New("upstream timeout")
 // concurrent requests to the same upstream force a fresh TCP/TLS handshake and
 // a fresh DNS lookup for nearly every one. Xray's XHTTP transport fans a single
 // client into many parallel POST/GET streams, which makes that default the
-// largest throughput limiter when relaying it, so the pool is widened here.
+// largest throughput limiter when relaying it. The pool is therefore sized for
+// hundreds of concurrent AI requests to one host, so a 300-way burst reuses
+// warm connections instead of churning through handshakes (and file
+// descriptors) it cannot get back.
 const (
-	maxIdleConns        = 1024
-	maxIdleConnsPerHost = 256
+	maxIdleConns        = 2048
+	maxIdleConnsPerHost = 1024
 	idleConnTimeout     = 90 * time.Second
 	dialTimeout         = 10 * time.Second
 	dialKeepAlive       = 30 * time.Second
-	tlsSessionCacheSize = 256
+	tlsSessionCacheSize = 512
 )
 
 // httpsTransport serves TLS upstreams (and plaintext HTTP/1.1 upstreams while
@@ -112,10 +115,17 @@ var httpClient = &http.Client{Transport: transportRouter{}}
 
 // FetchOptions describes one upstream request.
 type FetchOptions struct {
-	Method    string
-	Headers   map[string]string
-	Body      io.Reader
+	Method  string
+	Headers map[string]string
+	Body    io.Reader
+	// TimeoutMs bounds the whole request, including reading the body. Use it
+	// for non-streaming calls.
 	TimeoutMs int
+	// HeaderTimeoutMs bounds only the wait for response headers. It is for
+	// streaming calls, where TimeoutMs is 0 and a stalled upstream must not
+	// hold the request open forever: once headers arrive the timer stops and
+	// the body may stream for as long as it needs.
+	HeaderTimeoutMs int
 	// URL, when set, is used directly instead of parsing rawURL. Callers that
 	// already hold a parsed URL (a cached provider base, or a validated config
 	// target) skip url.Parse on every request. The value is copied, so callers
@@ -124,22 +134,55 @@ type FetchOptions struct {
 }
 
 // FetchUpstream performs an upstream request. timeoutMs <= 0 disables the
-// timeout (used for streaming). A timeout maps to ErrUpstreamTimeout; other
-// failures (network, client cancellation) pass through unchanged.
+// overall timeout (used for streaming). A timeout maps to ErrUpstreamTimeout;
+// other failures (network, client cancellation) pass through unchanged.
+//
+// HeaderTimeoutMs, when set on a streaming call, bounds only the wait for
+// response headers. Without it a stalled upstream that never sends headers
+// would hold the stream (and its goroutine/socket) open indefinitely.
 //
 // The timeout context must outlive FetchUpstream itself: callers stream
 // response.Body afterwards, and cancelling on return would truncate every
 // streamed body. So the cancel function is deferred to the body's Close.
 func FetchUpstream(ctx context.Context, rawURL string, opts FetchOptions) (*http.Response, error) {
-	if opts.TimeoutMs <= 0 {
+	if opts.TimeoutMs <= 0 && opts.HeaderTimeoutMs <= 0 {
 		return do(ctx, rawURL, opts)
 	}
 
-	requestCtx, cancel := context.WithTimeout(ctx, time.Duration(opts.TimeoutMs)*time.Millisecond)
+	var (
+		requestCtx context.Context
+		cancel     context.CancelFunc
+	)
+	if opts.TimeoutMs > 0 {
+		requestCtx, cancel = context.WithTimeout(ctx, time.Duration(opts.TimeoutMs)*time.Millisecond)
+	} else {
+		requestCtx, cancel = context.WithCancel(ctx)
+	}
+
+	// The header deadline is a plain timer, not a context deadline: it must be
+	// stopped the moment headers arrive so a long stream is not cut off.
+	var headerTimer *time.Timer
+	if opts.TimeoutMs <= 0 && opts.HeaderTimeoutMs > 0 {
+		headerTimer = time.AfterFunc(
+			time.Duration(opts.HeaderTimeoutMs)*time.Millisecond,
+			cancel,
+		)
+	}
+
 	response, err := do(requestCtx, rawURL, opts)
+	if headerTimer != nil && !headerTimer.Stop() && ctx.Err() == nil {
+		// The header timer fired (or was firing) while the request was still in
+		// flight. Treat it as an upstream timeout rather than handing back a
+		// body whose context is already cancelled.
+		cancel()
+		if response != nil && response.Body != nil {
+			_ = response.Body.Close()
+		}
+		return nil, fmt.Errorf("%w after %dms", ErrUpstreamTimeout, opts.HeaderTimeoutMs)
+	}
 	if err != nil {
 		cancel()
-		if requestCtx.Err() == context.DeadlineExceeded && ctx.Err() == nil {
+		if opts.TimeoutMs > 0 && requestCtx.Err() == context.DeadlineExceeded && ctx.Err() == nil {
 			return nil, fmt.Errorf("%w after %dms", ErrUpstreamTimeout, opts.TimeoutMs)
 		}
 		return nil, err

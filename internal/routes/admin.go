@@ -1231,10 +1231,17 @@ func (h *AdminResources) stats(w http.ResponseWriter, r *http.Request) {
 		internalError(w, "provider stats", err)
 		return
 	}
-	configStats, err := db.APIConfigStatsAll()
-	if err != nil {
-		internalError(w, "api config stats", err)
-		return
+	// The bundled dashboard only reads today/models. The all-time per-config
+	// breakdown is the most expensive query on this endpoint (a grouped scan
+	// over the whole retention window), so it is opt-in for scripts that need
+	// it instead of running on every 30s poll.
+	var configStats []db.APIConfigStats
+	if r.URL.Query().Get("full") == "1" {
+		configStats, err = db.APIConfigStatsAll()
+		if err != nil {
+			internalError(w, "api config stats", err)
+			return
+		}
 	}
 
 	modelRows := make([]modelStatDTO, 0, len(models))

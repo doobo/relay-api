@@ -53,7 +53,7 @@ func TestResolverCacheInvalidation(t *testing.T) {
 		t.Fatalf("initial upstream = %q", routes[0].UpstreamModel)
 	}
 
-	cfg, err := resolver.ProviderConfig(routes[0], 1000)
+	cfg, err := resolver.ProviderConfig(routes[0], 1000, 0)
 	if err != nil {
 		t.Fatalf("initial provider config: %v", err)
 	}
@@ -85,7 +85,7 @@ func TestResolverCacheInvalidation(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("update provider: %v", err)
 	}
-	cfg, err = resolver.ProviderConfig(routes[0], 1000)
+	cfg, err = resolver.ProviderConfig(routes[0], 1000, 0)
 	if err != nil {
 		t.Fatalf("provider config after update: %v", err)
 	}

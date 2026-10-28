@@ -226,4 +226,6 @@ func resetHotCaches() {
 	quotaMu.Lock()
 	quotaCounters = make(map[int64]*quotaCounter)
 	quotaMu.Unlock()
+	resetLiveStats()
+	resetConfigStatsCache()
 }

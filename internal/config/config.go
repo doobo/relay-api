@@ -85,6 +85,26 @@ type Config struct {
 	// long.
 	StreamIdleTimeoutMs int
 
+	// UpstreamMaxRetries is the number of extra attempts per route after a
+	// retryable upstream failure (network error, timeout, 408, 429, 5xx).
+	// 0 disables retries and keeps the old one-shot failover behaviour.
+	UpstreamMaxRetries int
+	// UpstreamRetryBaseMs is the first backoff delay; it doubles per attempt.
+	UpstreamRetryBaseMs int
+	// UpstreamRetryMaxMs caps the backoff delay.
+	UpstreamRetryMaxMs int
+	// UpstreamHeaderTimeoutMs bounds the wait for response headers on
+	// streaming AI calls. It stops an upstream that never answers from holding
+	// the stream open until the client disconnects. 0 disables it.
+	UpstreamHeaderTimeoutMs int
+	// UpstreamBreakerThreshold is the number of consecutive failed requests
+	// after which a provider is skipped for the cooldown. 0 disables the
+	// circuit breaker.
+	UpstreamBreakerThreshold int
+	// UpstreamBreakerCooldownMs is how long an open breaker rejects requests
+	// before admitting a single probe.
+	UpstreamBreakerCooldownMs int
+
 	// AccessLogSkipPrefixes are request path prefixes whose access-log line is
 	// suppressed (the tunnel is high-frequency by design).
 	AccessLogSkipPrefixes []string
@@ -96,7 +116,8 @@ type Config struct {
 	UsageHeaderSnapshots bool
 
 	// LogRetentionDays is how many days of usage/audit logs to keep; 0 disables
-	// the cleanup job.
+	// the cleanup. Quotas do not depend on these logs (see api_key_daily_usage),
+	// so this can be short even when monthly quotas are in use.
 	LogRetentionDays int
 	// LogCleanupTime is the local "HH:MM" time the daily cleanup runs.
 	LogCleanupTime string
@@ -109,22 +130,28 @@ func Load() Config {
 	ensureParentDir(databasePath)
 
 	return Config{
-		Port:                  intEnv("PORT", 5630),
-		DatabasePath:          databasePath,
-		AdminToken:            os.Getenv("ADMIN_TOKEN"),
-		AdminDefaultUsername:  getenv("ADMIN_DEFAULT_USERNAME", "admin"),
-		AdminDefaultPassword:  getenv("ADMIN_DEFAULT_PASSWORD", "admin123"),
-		AdminSessionTTLMs:     int64(intEnv("ADMIN_SESSION_TTL_HOURS", 24)) * 3_600_000,
-		AdminLoginRateLimit:   intEnv("ADMIN_LOGIN_RATE_LIMIT", 10),
-		LogLevel:              parseLogLevel(os.Getenv("LOG_LEVEL")),
-		RequestSizeLimitBytes: int64(intEnv("REQUEST_SIZE_LIMIT_MB", 10)) * 1024 * 1024,
-		RequestTimeoutMs:      intEnv("REQUEST_TIMEOUT_MS", 120_000),
-		StreamIdleTimeoutMs:   intEnv("STREAM_IDLE_TIMEOUT_MS", 60_000),
-		AccessLogSkipPrefixes: splitPrefixes(getenv("ACCESS_LOG_SKIP_PREFIXES", "/free")),
-		TunnelUsageSample:     intEnv("TUNNEL_USAGE_SAMPLE", 1),
-		UsageHeaderSnapshots:  boolEnv("USAGE_HEADER_SNAPSHOTS", true),
-		LogRetentionDays:      retentionDays(),
-		LogCleanupTime:        parseCleanupTime(os.Getenv("LOG_CLEANUP_TIME")),
+		Port:                      intEnv("PORT", 5630),
+		DatabasePath:              databasePath,
+		AdminToken:                os.Getenv("ADMIN_TOKEN"),
+		AdminDefaultUsername:      getenv("ADMIN_DEFAULT_USERNAME", "admin"),
+		AdminDefaultPassword:      getenv("ADMIN_DEFAULT_PASSWORD", "admin123"),
+		AdminSessionTTLMs:         int64(intEnv("ADMIN_SESSION_TTL_HOURS", 24)) * 3_600_000,
+		AdminLoginRateLimit:       intEnv("ADMIN_LOGIN_RATE_LIMIT", 10),
+		LogLevel:                  parseLogLevel(os.Getenv("LOG_LEVEL")),
+		RequestSizeLimitBytes:     int64(intEnv("REQUEST_SIZE_LIMIT_MB", 10)) * 1024 * 1024,
+		RequestTimeoutMs:          intEnv("REQUEST_TIMEOUT_MS", 120_000),
+		StreamIdleTimeoutMs:       intEnv("STREAM_IDLE_TIMEOUT_MS", 60_000),
+		UpstreamMaxRetries:        nonNegativeIntEnv("UPSTREAM_MAX_RETRIES", 1),
+		UpstreamRetryBaseMs:       intEnv("UPSTREAM_RETRY_BASE_MS", 250),
+		UpstreamRetryMaxMs:        intEnv("UPSTREAM_RETRY_MAX_MS", 4_000),
+		UpstreamHeaderTimeoutMs:   intEnv("UPSTREAM_HEADER_TIMEOUT_MS", 30_000),
+		UpstreamBreakerThreshold:  nonNegativeIntEnv("UPSTREAM_BREAKER_THRESHOLD", 5),
+		UpstreamBreakerCooldownMs: intEnv("UPSTREAM_BREAKER_COOLDOWN_MS", 30_000),
+		AccessLogSkipPrefixes:     splitPrefixes(getenv("ACCESS_LOG_SKIP_PREFIXES", "/free")),
+		TunnelUsageSample:         intEnv("TUNNEL_USAGE_SAMPLE", 10),
+		UsageHeaderSnapshots:      boolEnv("USAGE_HEADER_SNAPSHOTS", true),
+		LogRetentionDays:          retentionDays(),
+		LogCleanupTime:            parseCleanupTime(os.Getenv("LOG_CLEANUP_TIME")),
 	}
 }
 
@@ -144,6 +171,20 @@ func intEnv(name string, fallback int) int {
 	}
 	n, err := strconv.Atoi(strings.TrimSpace(raw))
 	if err != nil || n <= 0 {
+		return fallback
+	}
+	return n
+}
+
+// nonNegativeIntEnv parses an integer that may legitimately be zero (0 disables
+// a feature), falling back on missing/invalid input.
+func nonNegativeIntEnv(name string, fallback int) int {
+	raw := strings.TrimSpace(os.Getenv(name))
+	if raw == "" {
+		return fallback
+	}
+	n, err := strconv.Atoi(raw)
+	if err != nil || n < 0 {
 		return fallback
 	}
 	return n
@@ -207,6 +248,17 @@ func parseCleanupTime(raw string) string {
 		return raw
 	}
 	return "03:00"
+}
+
+// CleanupHourMinute returns the validated cleanup time as hour/minute. The
+// value is normalised by Load, so this always yields a valid local time.
+func (c Config) CleanupHourMinute() (int, int) {
+	if !isClockTime(c.LogCleanupTime) {
+		return 3, 0
+	}
+	hour, _ := strconv.Atoi(c.LogCleanupTime[0:2])
+	minute, _ := strconv.Atoi(c.LogCleanupTime[3:5])
+	return hour, minute
 }
 
 func isClockTime(value string) bool {

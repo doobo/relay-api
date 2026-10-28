@@ -7,6 +7,7 @@ import (
 	"errors"
 	"io"
 	"net/http"
+	"strconv"
 	"strings"
 	"sync/atomic"
 	"time"
@@ -94,12 +95,19 @@ func (g *Gateway) chat(w http.ResponseWriter, r *http.Request) {
 
 	var lastErr error
 	for _, route := range routes {
-		providerCfg, err := g.resolver.ProviderConfig(route, g.cfg.RequestTimeoutMs)
+		providerCfg, err := g.resolver.ProviderConfig(route, g.cfg.RequestTimeoutMs, g.cfg.UpstreamHeaderTimeoutMs)
 		if err != nil {
 			// A key that cannot be decrypted is a config problem, not an
 			// upstream failure: do not fail over.
 			httperr.Write(w, http.StatusInternalServerError, err.Error(), "internal_error", "provider_key_undecryptable")
 			return
+		}
+		// Checked after the config so a config error cannot leave a half-open
+		// probe unresolved (which would keep the breaker rejecting forever).
+		key := breakerKey(route)
+		if !g.breaker.Allow(key) {
+			lastErr = errCircuitOpen
+			continue
 		}
 		provider := providers.New(providerCfg)
 		request := providerRequest
@@ -107,6 +115,7 @@ func (g *Gateway) chat(w http.ResponseWriter, r *http.Request) {
 		if providerNeedsFullBody(providerCfg.Type) {
 			request.RawBody = middleware.ParsedJSON(r.Context())
 			if request.RawBody == nil {
+				g.breaker.Success(key)
 				invalidRequest(w, "Invalid JSON body")
 				return
 			}
@@ -122,16 +131,26 @@ func (g *Gateway) chat(w http.ResponseWriter, r *http.Request) {
 			// The stream gets its own cancelable context so the idle-timeout
 			// timer can abort a stalled upstream read.
 			streamCtx, cancelStream := context.WithCancel(r.Context())
-			upstream, err := provider.ChatStream(streamCtx, request)
+			upstream, err := callWithRetry(streamCtx, g.cfg.UpstreamMaxRetries, g.retryDelay, func() (*http.Response, error) {
+				return provider.ChatStream(streamCtx, request)
+			})
 			if err != nil {
 				cancelStream()
 				if shouldFailover(err) {
+					if r.Context().Err() != nil {
+						// The client is gone; stop without blaming the provider.
+						g.breaker.Success(key)
+						return
+					}
+					g.breaker.Failure(key)
 					lastErr = err
 					continue
 				}
+				g.breaker.Success(key)
 				g.writeUpstreamError(w, r, err, apiKeyID, model, route.Provider.Name, startedAt, true, r.Header, upstreamHeaders)
 				return
 			}
+			g.breaker.Success(key)
 			g.writeStream(w, r, upstream, cancelStream, streamMeta{
 				requestID:       requestID,
 				apiKeyID:        apiKeyID,
@@ -144,15 +163,24 @@ func (g *Gateway) chat(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 
-		result, err := provider.Chat(r.Context(), request)
+		result, err := callWithRetry(r.Context(), g.cfg.UpstreamMaxRetries, g.retryDelay, func() (*providers.Result, error) {
+			return provider.Chat(r.Context(), request)
+		})
 		if err != nil {
 			if shouldFailover(err) {
+				if r.Context().Err() != nil {
+					g.breaker.Success(key)
+					return
+				}
+				g.breaker.Failure(key)
 				lastErr = err
 				continue
 			}
+			g.breaker.Success(key)
 			g.writeUpstreamError(w, r, err, apiKeyID, model, route.Provider.Name, startedAt, false, r.Header, upstreamHeaders)
 			return
 		}
+		g.breaker.Success(key)
 		g.writeCompletion(w, result, requestID)
 		g.recordAI(requestID, apiKeyID, model, route.Provider.Name, result.Usage, startedAt, http.StatusOK, false, nil, r.Header, upstreamHeaders)
 		return
@@ -237,6 +265,18 @@ func (g *Gateway) writeFinalError(w http.ResponseWriter, r *http.Request, lastEr
 	message := "All provider routes failed"
 	if lastErr != nil {
 		message = lastErr.Error()
+	}
+	if errors.Is(lastErr, errCircuitOpen) {
+		// Every route was skipped because its breaker is open: the upstream is
+		// known to be failing, so 503 (retry later) is more accurate than 502.
+		status = http.StatusServiceUnavailable
+		code = "upstream_unavailable"
+		message = "All upstream providers are temporarily unavailable"
+		retryAfter := g.cfg.UpstreamBreakerCooldownMs / 1000
+		if retryAfter < 1 {
+			retryAfter = 1
+		}
+		w.Header().Set("Retry-After", strconv.Itoa(retryAfter))
 	}
 
 	var statusErr *util.UpstreamStatusError

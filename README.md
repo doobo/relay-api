@@ -8,7 +8,7 @@ OpenAI 兼容的 API 中转网关，后端使用 Go 实现，前端管理界面�
 
 - OpenAI 兼容接口：`/v1/models`、`/v1/chat/completions`、`/v1/responses`，支持 SSE 流式响应
 - `/v1/responses` 兼容层：把 Responses 请求（Codex CLI 默认使用的 `wire_api = "responses"`）转换为内部 Chat Completions 管线，并回传 Responses 输出项与事件（文本、推理、function/custom 工具调用）
-- 多上游管理：provider / model / model-route（优先级 + 故障转移）配置
+- 多上游管理：provider / model / model-route（优先级 + 故障转移 + 指数退避重试 + 熔断）配置
 - Provider 协议适配：`openai` / `compatible`（Chat Completions）、`anthropic`（Messages）、`openai-responses`（Responses API）
 - Provider 自定义请求头：`${客户端header}` 引入客户端值，`${_ai_session}` 引入解析出的用户会话标识
 - API Key 鉴权与限流，密钥仅存加密值（AES-GCM）
@@ -66,11 +66,17 @@ CGO_ENABLED=0 go build -trimpath -ldflags "-s -w" -o relay-api .
 | `REQUEST_SIZE_LIMIT_MB` | `10` | `/v1/*` 与 `/open/*` 的请求体大小上限（MB）；`/free/*` 不受此限制 |
 | `REQUEST_TIMEOUT_MS` | `120000` | 非流式聊天请求与 `/open/*` 转发的上游超时（毫秒） |
 | `STREAM_IDLE_TIMEOUT_MS` | `60000` | SSE 流无数据块的最长空闲时间（毫秒），超时主动断开 |
+| `UPSTREAM_MAX_RETRIES` | `1` | 单个路由遇到可重试错误（网络错误/超时/408/429/5xx）后的额外重试次数；`0` 关闭重试 |
+| `UPSTREAM_RETRY_BASE_MS` | `250` | 首次重试的退避基数（毫秒），之后按 2 倍递增 |
+| `UPSTREAM_RETRY_MAX_MS` | `4000` | 单次退避的上限（毫秒） |
+| `UPSTREAM_HEADER_TIMEOUT_MS` | `30000` | 流式请求等待上游响应头的上限（毫秒）；超时按上游超时处理并触发重试/熔断，`0` 关闭 |
+| `UPSTREAM_BREAKER_THRESHOLD` | `5` | 同一 Provider 连续失败多少次后熔断；`0` 关闭熔断 |
+| `UPSTREAM_BREAKER_COOLDOWN_MS` | `30000` | 熔断持续时间（毫秒），到期后放行一个探测请求 |
 | `ACCESS_LOG_SKIP_PREFIXES` | `/free` | 不写访问日志的路径前缀（逗号分隔）；请求 ID 仍会生成，设为空可记录所有请求 |
-| `TUNNEL_USAGE_SAMPLE` | `1` | `/free` 成功请求写入用量日志的采样率，`N` 表示每 N 条记录 1 条；错误请求始终记录 |
+| `TUNNEL_USAGE_SAMPLE` | `10` | `/free` 成功请求写入用量日志的采样率，`N` 表示每 N 条记录 1 条；错误请求始终记录 |
 | `USAGE_HEADER_SNAPSHOTS` | `true` | 是否在用量日志中保存请求/上游 header 快照；设为 `false` 可减少 CPU 开销与数据库体积 |
-| `LOG_RETENTION_DAYS` | `7` | 用量/审计日志保留天数；设为 `0` 关闭清理任务 |
-| `LOG_CLEANUP_TIME` | `03:00` | 每日清理任务的本地时间（`HH:MM`），格式非法时回退到 `03:00` |
+| `LOG_RETENTION_DAYS` | `7` | 用量/审计日志保留天数；`0` 表示永久保留。周/月配额不依赖日志（见“配额与日志保留”），可以放心设短 |
+| `LOG_CLEANUP_TIME` | `03:00` | 每日自动清理的本地时间（`HH:MM`）；进程启动时也会补跑一次，避免频繁重启错过清理 |
 | `SECRET_ENCRYPTION_KEY` | 空 | 32 字节 base64 密钥，优先级高于密钥文件；`openssl rand -base64 32` 可生成 |
 | `SECRET_KEY_FILE` | `data/.secret-key` | 密钥文件路径；文件不存在时自动生成（权限 `0600`） |
 | `UPSTREAM_H2C` | 空 | 设为 `1`/`true`/`yes`/`on` 时，明文 `http://` 上游改用 h2c（明文 HTTP/2）；默认关闭，避免不支持 h2c 的上游被拒绝 |
@@ -81,6 +87,24 @@ CGO_ENABLED=0 go build -trimpath -ldflags "-s -w" -o relay-api .
 PORT=8080 LOG_LEVEL=debug DATABASE_PATH=/var/lib/relay-api/gateway.db \
 SECRET_KEY_FILE=/var/lib/relay-api/.secret-key ./relay-api
 ```
+
+## 上游重试与熔断
+
+`/v1/*` 的每次上游调用遇到可重试错误（网络错误、超时、408、429、5xx）时，会按 `UPSTREAM_MAX_RETRIES` 在同一路由上做指数退避重试：`UPSTREAM_RETRY_BASE_MS` 起步、逐次翻倍、`UPSTREAM_RETRY_MAX_MS` 封顶，并带 50%~100% 的随机抖动，避免并发请求在同一时刻集中重试。非可重试状态（400/401/403/404 等）不会重试，直接按上游状态码透传。
+
+同一 Provider 连续失败 `UPSTREAM_BREAKER_THRESHOLD` 次后熔断 `UPSTREAM_BREAKER_COOLDOWN_MS`：期间该 Provider 的路由被直接跳过（有备用路由时自动走备用），到期后只放行一个探测请求，成功即恢复、失败则重新计时。所有路由都处于熔断状态时返回 `503 upstream_unavailable`（而不是 502），客户端可据此退避重试。
+
+重试只发生在响应头返回之前，已经开始向客户端输出的 SSE 流不会被重放；客户端主动断开也不会被计入熔断失败次数。
+
+## 配额与日志保留
+
+日/周/月配额读取的是 `api_key_daily_usage`（按 `API Key + 本地日期` 汇总的小表），而不是 `usage_logs`：
+
+- **日志清理不会影响周/月配额**。`LOG_RETENTION_DAYS` 只作用于用量/审计日志，可以按磁盘情况设成 3 天甚至更短。
+- 每天 `LOG_CLEANUP_TIME` 清理日志后，内存配额计数器会被清空；下一次请求按日汇总重新加载“周/月基数 + 当日用量”。当日用量由内存计数器实时累加，热路径不查库。
+- 汇总表保留 400 天（远大于 31 天的月窗口），首次升级会从最近 40 天的 `usage_logs` 自动回填一次（受当时的日志保留期限制）。
+- `LOG_RETENTION_DAYS=0` 表示永久保留日志；手动清理接口也不会再把它当成“全部删除”。
+- 日志按每批 1 万行分批删除，首次清理大表时不会长时间占住 SQLite 写连接。
 
 ## Provider 自定义 Header 与会话标识
 
@@ -177,6 +201,8 @@ make clean-dist                       # 删除 dist/
 
 - `CGO_ENABLED=0` 静态编译（SQLite 驱动为纯 Go 的 `modernc.org/sqlite`）
 - 持久化 `DATABASE_PATH` 指向的目录，并同时保留 `SECRET_KEY_FILE`，二者需一起备份
+- 访问日志经有界队列（8192 条）批量异步写入 stdout：请求线程只入队，stdout 被阻塞时不会拖慢网站或 `/v1`，队列满的日志会被丢弃并在下一次落盘时输出 `dropped=N` 统计；请确保日志消费者（docker logs、面板、重定向文件）正常读取
+- 仪表盘“今日”统计由内存计数器维护：启动时从 SQLite 预热一次，之后随用量写入实时递增，不会随着 `usage_logs` 变大而变慢；`/admin/stats` 默认不返回全量配置统计，脚本需要时加 `?full=1`
 - 服务器层刻意不设置 `WriteTimeout`/`ReadTimeout`（长连接 SSE 与 `/free` 隧道需要），空闲控制由 `STREAM_IDLE_TIMEOUT_MS` 在处理器内完成
 - 反向代理需允许长连接并关闭响应缓冲（Nginx 参考：`proxy_buffering off;`），否则流式响应会被缓冲
 

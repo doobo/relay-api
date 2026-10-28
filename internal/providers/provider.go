@@ -32,6 +32,9 @@ type Config struct {
 	// compiling Headers per request (tests and directly constructed configs).
 	HeaderTemplates  []HeaderTemplate
 	RequestTimeoutMs int
+	// HeaderTimeoutMs bounds the wait for response headers on streaming
+	// calls. Zero disables it.
+	HeaderTimeoutMs int
 }
 
 // endpoint resolves one upstream path against the provider's base URL. It

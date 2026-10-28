@@ -3,6 +3,7 @@ package db
 import (
 	"database/sql"
 	"fmt"
+	"log/slog"
 )
 
 // schema is the full baseline, transcribed from the reference gateway's
@@ -117,6 +118,17 @@ CREATE TABLE IF NOT EXISTS audit_logs (
   created_at INTEGER NOT NULL
 );
 
+/* Per-key, per-local-day usage rollup. Quota accounting reads this table
+   instead of usage_logs, so purging logs cannot shrink weekly/monthly usage.
+   day is YYYYMMDD; tokens include the same total_tokens the log row stored. */
+CREATE TABLE IF NOT EXISTS api_key_daily_usage (
+  day INTEGER NOT NULL,
+  api_key_id INTEGER NOT NULL,
+  requests INTEGER NOT NULL DEFAULT 0,
+  tokens INTEGER NOT NULL DEFAULT 0,
+  PRIMARY KEY (day, api_key_id)
+);
+
 CREATE TABLE IF NOT EXISTS admin_users (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   username TEXT NOT NULL UNIQUE,
@@ -139,13 +151,18 @@ CREATE INDEX IF NOT EXISTS idx_usage_created ON usage_logs(created_at);
 CREATE INDEX IF NOT EXISTS idx_usage_model ON usage_logs(model);
 CREATE INDEX IF NOT EXISTS idx_usage_config ON usage_logs(api_config_id);
 CREATE INDEX IF NOT EXISTS idx_usage_key_created ON usage_logs(api_key_id, created_at);
+-- Per-key day-range scans for the weekly/monthly quota windows.
+CREATE INDEX IF NOT EXISTS idx_key_daily_key ON api_key_daily_usage(api_key_id, day);
+-- Covers the all-time per-config aggregate (configs page): every selected
+-- column lives in the index, so SQLite never touches the table rows.
+CREATE INDEX IF NOT EXISTS idx_usage_config_cover ON usage_logs(kind, api_config_id, status, latency_ms);
 `
 
 // Migrate creates the schema and applies the incremental column additions that
 // existing databases from the reference gateway need. SQLite has no
 // ADD COLUMN IF NOT EXISTS, so ensureColumn checks PRAGMA table_info first.
 func Migrate(db *sql.DB) error {
-	return Transaction(func(tx *sql.Tx) error {
+	if err := Transaction(func(tx *sql.Tx) error {
 		if _, err := tx.Exec(schema); err != nil {
 			return fmt.Errorf("create schema: %w", err)
 		}
@@ -192,7 +209,23 @@ func Migrate(db *sql.DB) error {
 		}
 		// Added with account roles; pre-existing accounts were full admins.
 		return ensureColumn(tx, "admin_users", "role", "TEXT NOT NULL DEFAULT 'admin'")
-	})
+	}); err != nil {
+		return err
+	}
+
+	// Seed api_key_daily_usage from existing logs on the first start after the
+	// rollup was introduced, so quotas keep working without waiting a day.
+	if err := backfillDailyUsage(); err != nil {
+		slog.Warn("backfill daily key usage", "error", err)
+	}
+
+	// Seed the in-memory dashboard counters only after the schema exists: Open
+	// runs before Migrate on a fresh database. A failed seed is not fatal, the
+	// stats endpoints fall back to SQL.
+	if err := initLiveStats(); err != nil {
+		slog.Warn("seed live usage stats", "error", err)
+	}
+	return nil
 }
 
 // ensureColumn adds a column when it is missing.

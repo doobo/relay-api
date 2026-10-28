@@ -163,7 +163,7 @@ func (r *Resolver) resolveUncached(modelName string) ([]Route, error) {
 // ProviderConfig decrypts the provider key for upstream calls. It fails loudly
 // rather than sending ciphertext as a bearer token. Decrypted configs are
 // cached per provider and generation.
-func (r *Resolver) ProviderConfig(route Route, requestTimeoutMs int) (providers.Config, error) {
+func (r *Resolver) ProviderConfig(route Route, requestTimeoutMs, headerTimeoutMs int) (providers.Config, error) {
 	gen := db.AIResourceGeneration()
 	r.mu.RLock()
 	var cfg providers.Config
@@ -174,6 +174,7 @@ func (r *Resolver) ProviderConfig(route Route, requestTimeoutMs int) (providers.
 	r.mu.RUnlock()
 	if ok {
 		cfg.RequestTimeoutMs = requestTimeoutMs
+		cfg.HeaderTimeoutMs = headerTimeoutMs
 		return cfg, nil
 	}
 
@@ -185,6 +186,7 @@ func (r *Resolver) ProviderConfig(route Route, requestTimeoutMs int) (providers.
 	if cached, cachedOK := r.configs[route.Provider.ID]; cachedOK {
 		r.mu.Unlock()
 		cached.RequestTimeoutMs = requestTimeoutMs
+		cached.HeaderTimeoutMs = headerTimeoutMs
 		return cached, nil
 	}
 	r.mu.Unlock()
@@ -199,7 +201,7 @@ func (r *Resolver) ProviderConfig(route Route, requestTimeoutMs int) (providers.
 		fresh.Provider = *provider
 	}
 
-	cfg, err := r.providerConfigUncached(fresh, requestTimeoutMs)
+	cfg, err := r.providerConfigUncached(fresh, requestTimeoutMs, headerTimeoutMs)
 	if err != nil {
 		return providers.Config{}, err
 	}
@@ -213,11 +215,12 @@ func (r *Resolver) ProviderConfig(route Route, requestTimeoutMs int) (providers.
 	}
 	r.mu.Unlock()
 	cfg.RequestTimeoutMs = requestTimeoutMs
+	cfg.HeaderTimeoutMs = headerTimeoutMs
 	return cfg, nil
 }
 
 // providerConfigUncached decodes headers and decrypts the stored API key.
-func (r *Resolver) providerConfigUncached(route Route, requestTimeoutMs int) (providers.Config, error) {
+func (r *Resolver) providerConfigUncached(route Route, requestTimeoutMs, headerTimeoutMs int) (providers.Config, error) {
 	headers := parseProviderHeaders(route.Provider.Headers)
 	cfg := providers.Config{
 		ID:               route.Provider.ID,
@@ -228,6 +231,7 @@ func (r *Resolver) providerConfigUncached(route Route, requestTimeoutMs int) (pr
 		Headers:          headers,
 		HeaderTemplates:  providers.CompileHeaders(headers),
 		RequestTimeoutMs: requestTimeoutMs,
+		HeaderTimeoutMs:  headerTimeoutMs,
 	}
 	if route.Provider.APIKey != nil && *route.Provider.APIKey != "" {
 		plaintext, err := r.secrets.Decrypt(*route.Provider.APIKey)

@@ -214,11 +214,12 @@ func (p *Anthropic) ChatStream(ctx context.Context, request Request) (*http.Resp
 	}
 	rawURL, targetURL := p.cfg.endpoint("/messages")
 	upstream, err := util.FetchUpstream(ctx, rawURL, util.FetchOptions{
-		Method:    http.MethodPost,
-		Headers:   p.headers(request),
-		Body:      bytes.NewReader(payload),
-		TimeoutMs: 0,
-		URL:       targetURL,
+		Method:          http.MethodPost,
+		Headers:         p.headers(request),
+		Body:            bytes.NewReader(payload),
+		TimeoutMs:       0,
+		HeaderTimeoutMs: p.cfg.HeaderTimeoutMs,
+		URL:             targetURL,
 	})
 	if err != nil {
 		return nil, err
