@@ -63,6 +63,7 @@ CGO_ENABLED=0 go build -trimpath -ldflags "-s -w" -o relay-api .
 | `ADMIN_SESSION_TTL_HOURS` | `24` | 管理后台会话有效期（小时） |
 | `ADMIN_LOGIN_RATE_LIMIT` | `10` | 单 IP 每分钟允许的失败登录次数，超出后该 IP 被限流 |
 | `LOG_LEVEL` | `info` | 日志级别：`debug` / `info` / `warn` / `error` |
+| `MAX_OPEN_FILES` | `65535` | 启动时把软 `RLIMIT_NOFILE` 提到该值（受硬上限约束；Linux/macOS 生效）。每条 `/free` 隧道占用 2 个 fd，默认软上限 1024 约 500 条隧道就会耗尽 |
 | `REQUEST_SIZE_LIMIT_MB` | `10` | `/v1/*` 与 `/open/*` 的请求体大小上限（MB）；`/free/*` 不受此限制 |
 | `REQUEST_TIMEOUT_MS` | `120000` | 非流式聊天请求与 `/open/*` 转发的上游超时（毫秒） |
 | `STREAM_IDLE_TIMEOUT_MS` | `60000` | SSE 流无数据块的最长空闲时间（毫秒），超时主动断开 |
@@ -125,6 +126,31 @@ SECRET_KEY_FILE=/var/lib/relay-api/.secret-key ./relay-api
 }
 ```
 
+## 推理内容回放（thinking / reasoning_content，可选）
+
+DeepSeek V4 等 thinking 模式模型要求多轮对话时把上一轮的推理内容原样传回，否则上游直接 400：
+
+```
+The `reasoning_content` in the thinking mode must be passed back to the API.
+The `content[].thinking` in the thinking mode must be passed back to the API.
+```
+
+OpenAI 格式的客户端（OpenCode、绝大多数 agent）不会把 `reasoning_content` 放进下一轮历史，所以**第一轮正常、第二轮开始报错**。
+
+默认**关闭**，因为它是转发路径上唯一会改动请求体的行为。需要时在 Provider 上打开：编辑 Provider，勾选 `reasoning replay`（或 API `"reasoningReplay": true`）。
+
+打开后：
+
+- 响应返回的 `reasoning_content`（流式或非流式）会按 `Provider + 模型别名 + 会话标识 + 该轮正文/tool_call id` 记在内存里；
+- 下一次请求里，客户端漏掉推理的 assistant 消息会被补上 `reasoning_content`；如果客户端用的是 `reasoning` 字段，会同时镜像一份 `reasoning_content`；
+- 客户端已经带了推理时不覆盖；不支持推理的上游因为缓存里没有对应条目，永远不会被改写。
+
+限制：
+
+- 缓存是进程内的（2048 条 / 6 小时 TTL），重启或多实例部署后会失效，届时会退回上游原始的 400；
+- 只对 `openai` / `compatible` Provider 生效；`anthropic` 类型走自己的请求转换，目前不透传 thinking 块；
+- 会话标识来自上面的解析规则，客户端固定发送 `x-opencode-session` 之类的头能让回放更稳定。
+
 ## 路由概览
 
 | 路径 | 鉴权 | 说明 |
@@ -143,6 +169,7 @@ SECRET_KEY_FILE=/var/lib/relay-api/.secret-key ./relay-api
 .
 ├── main.go                  # 程序入口：装配中间件、路由、h2c 服务与优雅退出
 ├── go.mod / go.sum
+├── deploy/relay-api.service # systemd 示例（LimitNOFILE / GOMEMLIMIT）
 ├── task.md                  # 原始任务说明
 ├── 实现方案.md               # 详细实现方案与验收清单
 ├── internal/
@@ -201,10 +228,37 @@ make clean-dist                       # 删除 dist/
 
 - `CGO_ENABLED=0` 静态编译（SQLite 驱动为纯 Go 的 `modernc.org/sqlite`）
 - 持久化 `DATABASE_PATH` 指向的目录，并同时保留 `SECRET_KEY_FILE`，二者需一起备份
-- 访问日志经有界队列（8192 条）批量异步写入 stdout：请求线程只入队，stdout 被阻塞时不会拖慢网站或 `/v1`，队列满的日志会被丢弃并在下一次落盘时输出 `dropped=N` 统计；请确保日志消费者（docker logs、面板、重定向文件）正常读取
+- 访问日志经有界队列（8192 条）批量异步写入 stdout：攒到 64 KiB 或 **100 行**（先到者）即刷一批，最多等 200 ms；请求线程只入队，stdout 被阻塞时不会拖慢网站或 `/v1`，队列满的日志会被丢弃并在下一次落盘时输出 `dropped=N` 统计；请确保日志消费者（docker logs、面板、重定向文件）正常读取
 - 仪表盘“今日”统计由内存计数器维护：启动时从 SQLite 预热一次，之后随用量写入实时递增，不会随着 `usage_logs` 变大而变慢；`/admin/stats` 默认不返回全量配置统计，脚本需要时加 `?full=1`
 - 服务器层刻意不设置 `WriteTimeout`/`ReadTimeout`（长连接 SSE 与 `/free` 隧道需要），空闲控制由 `STREAM_IDLE_TIMEOUT_MS` 在处理器内完成
 - 反向代理需允许长连接并关闭响应缓冲（Nginx 参考：`proxy_buffering off;`），否则流式响应会被缓冲
+
+### 容量与资源上限
+
+`/free` 隧道是公开的、长连接的，而且每条隧道同时占用**客户端 socket + 上游 socket**，所以容量瓶颈通常不是 CPU 而是资源：
+
+- **文件描述符**：进程启动时会把软 `RLIMIT_NOFILE` 提到 `MAX_OPEN_FILES`（默认 65535，受硬上限约束）。硬上限本身来自部署环境，参考 `deploy/relay-api.service`：
+
+  ```ini
+  LimitNOFILE=65535
+  # 容器则是：docker run --ulimit nofile=65535:65535 ...
+  ```
+
+  默认的 1024 软上限大约只能撑 500 条并发隧道，达到上限后 `accept()` 报 `EMFILE`，**包括 `/v1` 在内的所有新请求都会被拒绝**。
+- **单条隧道的内存**：`copyAndFlush` 的 64 KiB 缓冲在整条响应期间都会占住（包括阻塞在读取、暂时没有数据时），所以内存约等于 `64 KiB × 并发隧道数`。3000 条并发隧道约 190 MiB，另有每条隧道的 goroutine 栈与 http2 流控缓冲。
+- **堆上限**：建议给 Go 设置软上限 `GOMEMLIMIT`（约为容器内存的 60%~75%），否则运行时可能要等到约 2 倍活跃堆才 GC，突发缓冲很容易把内存顶爆：
+
+  ```bash
+  GOMEMLIMIT=1200MiB ./relay-api
+  ```
+- **`/free` 的默认限额**：新建配置默认 `streamTimeoutMs=300000`（5 分钟）与 `streamMaxBodyMb=8`；显式填 `0` 表示不限（旧库升级时会把历史配置里的 0 一次性改成这两个默认值，之后手动设 0 不会被覆盖）。没有超时的隧道在客户端/上游异常消失时会永久占住 fd 和缓冲，因此不建议把超时设为 0。
+- **按客户端限并发**：代码里没有针对 `/free` 的按 IP 并发限制（该路径完全公开）。需要防风控时在前置 Nginx/HAProxy 上限制，例如：
+
+  ```nginx
+  limit_conn_zone $binary_remote_addr zone=free_conn:10m;
+  location /free/ { limit_conn free_conn 200; proxy_buffering off; }
+  ```
+- **隔离**：如果 `/free` 的流量与 AI 中转不允许互相影响，最稳妥的做法是**同一个二进制起两个进程**（改 `PORT` 与 `DATABASE_PATH`），让 fd 与内存风险彻底分开。
 
 ## 许可证
 

@@ -35,7 +35,7 @@ export async function loadProviders() {
       list.map((p) => [
         p.id,
         p.name,
-        p.type,
+        p.reasoning_replay ? `${p.type} + replay` : p.type,
         p.base_url,
         String(Object.keys(p.headers || {}).length),
         p.api_key_masked || "(none)",
@@ -78,6 +78,7 @@ function openProviderEdit(p) {
   form.elements.headers.value = Object.keys(p.headers || {}).length
     ? JSON.stringify(p.headers)
     : "";
+  form.elements.reasoningReplay.checked = Boolean(p.reasoning_replay);
   form.elements.enabled.checked = Boolean(p.enabled);
   openDialog("providerEditDialog");
 }
@@ -118,6 +119,7 @@ export function initProviders() {
         type: form.elements.type.value,
         baseUrl: form.elements.baseUrl.value,
         headers: parseHeaderInput(form.elements.headers.value),
+        reasoningReplay: form.elements.reasoningReplay.checked,
         enabled: form.elements.enabled.checked,
       };
       const newKey = form.elements.apiKey.value.trim();
@@ -145,6 +147,7 @@ export function initProviders() {
           type: form.get("type"),
           baseUrl: form.get("baseUrl"),
           headers: parseHeaderInput(form.get("headers")),
+          reasoningReplay: form.get("reasoningReplay") === "on",
           apiKey: form.get("apiKey") || null,
         }),
       });

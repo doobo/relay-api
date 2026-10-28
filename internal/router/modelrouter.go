@@ -230,6 +230,7 @@ func (r *Resolver) providerConfigUncached(route Route, requestTimeoutMs, headerT
 		BaseURLParsed:    parseProviderBaseURL(route.Provider.BaseURL),
 		Headers:          headers,
 		HeaderTemplates:  providers.CompileHeaders(headers),
+		ReasoningReplay:  route.Provider.ReasoningReplay,
 		RequestTimeoutMs: requestTimeoutMs,
 		HeaderTimeoutMs:  headerTimeoutMs,
 	}

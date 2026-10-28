@@ -264,6 +264,51 @@ func TestTunnelClientDisconnect(t *testing.T) {
 	}
 }
 
+// TestTunnelStreamTimeout verifies that a stream which stops producing data is
+// cut by streamTimeoutMs and recorded as 504 instead of lingering forever (and
+// being logged as a clean 200).
+func TestTunnelStreamTimeout(t *testing.T) {
+	harness := newTunnelHarness(t)
+
+	mock := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		if flusher, ok := w.(http.Flusher); ok {
+			_, _ = w.Write([]byte("partial"))
+			flusher.Flush()
+		}
+		<-r.Context().Done()
+	}))
+	defer mock.Close()
+
+	mustConfig(t, db.NewAPIConfig{
+		Name: "stall", Method: "GET", URL: mock.URL,
+		StreamTimeoutMs: 150, Route: "free", Enabled: true,
+	})
+
+	started := time.Now()
+	recorder := httptest.NewRecorder()
+	harness.handler.ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "/free/stall", nil))
+	if elapsed := time.Since(started); elapsed > 5*time.Second {
+		t.Fatalf("handler ran for %v; the stream timeout did not cut it short", elapsed)
+	}
+	if err := db.FlushUsage(context.Background()); err != nil {
+		t.Fatalf("flush usage: %v", err)
+	}
+
+	var status *int
+	var message *string
+	row := db.Get().QueryRow(`SELECT status, error FROM usage_logs ORDER BY id DESC LIMIT 1`)
+	if err := row.Scan(&status, &message); err != nil {
+		t.Fatalf("scan usage: %v", err)
+	}
+	if status == nil || *status != http.StatusGatewayTimeout {
+		t.Fatalf("recorded status = %v, want 504", status)
+	}
+	if message == nil || !strings.Contains(*message, "timeout") {
+		t.Fatalf("recorded error = %v, want a timeout", message)
+	}
+}
+
 // TestTunnelUsage verifies the usage row shape: kind=api, no API key, and a
 // target_url without the query string.
 func TestTunnelUsage(t *testing.T) {

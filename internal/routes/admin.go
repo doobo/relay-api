@@ -115,29 +115,31 @@ func isUniqueViolation(err error) bool {
 // ----------------------------------------------------------------- providers
 
 type providerDTO struct {
-	ID           int64             `json:"id"`
-	Name         string            `json:"name"`
-	Type         string            `json:"type"`
-	BaseURL      string            `json:"base_url"`
-	Headers      map[string]string `json:"headers"`
-	Enabled      int               `json:"enabled"`
-	CreatedAt    int64             `json:"created_at"`
-	UpdatedAt    int64             `json:"updated_at"`
-	HasAPIKey    bool              `json:"has_api_key"`
-	APIKeyMasked *string           `json:"api_key_masked"`
-	APIKeyError  bool              `json:"api_key_error,omitempty"`
+	ID              int64             `json:"id"`
+	Name            string            `json:"name"`
+	Type            string            `json:"type"`
+	BaseURL         string            `json:"base_url"`
+	Headers         map[string]string `json:"headers"`
+	ReasoningReplay bool              `json:"reasoning_replay"`
+	Enabled         int               `json:"enabled"`
+	CreatedAt       int64             `json:"created_at"`
+	UpdatedAt       int64             `json:"updated_at"`
+	HasAPIKey       bool              `json:"has_api_key"`
+	APIKeyMasked    *string           `json:"api_key_masked"`
+	APIKeyError     bool              `json:"api_key_error,omitempty"`
 }
 
 func (h *AdminResources) providerDTO(provider db.ProviderRow) providerDTO {
 	dto := providerDTO{
-		ID:        provider.ID,
-		Name:      provider.Name,
-		Type:      provider.Type,
-		BaseURL:   provider.BaseURL,
-		Headers:   providerHeaders(provider.Headers),
-		Enabled:   boolInt(provider.Enabled),
-		CreatedAt: provider.CreatedAt,
-		UpdatedAt: provider.UpdatedAt,
+		ID:              provider.ID,
+		Name:            provider.Name,
+		Type:            provider.Type,
+		BaseURL:         provider.BaseURL,
+		Headers:         providerHeaders(provider.Headers),
+		ReasoningReplay: provider.ReasoningReplay,
+		Enabled:         boolInt(provider.Enabled),
+		CreatedAt:       provider.CreatedAt,
+		UpdatedAt:       provider.UpdatedAt,
 	}
 	if provider.APIKey != nil && *provider.APIKey != "" {
 		plaintext, err := h.secrets.Decrypt(*provider.APIKey)
@@ -180,12 +182,13 @@ func (h *AdminResources) providers(w http.ResponseWriter, r *http.Request) {
 
 func (h *AdminResources) createProvider(w http.ResponseWriter, r *http.Request) {
 	var body struct {
-		Name    string            `json:"name"`
-		Type    string            `json:"type"`
-		BaseURL string            `json:"baseUrl"`
-		APIKey  *string           `json:"apiKey"`
-		Headers map[string]string `json:"headers"`
-		Enabled *bool             `json:"enabled"`
+		Name            string            `json:"name"`
+		Type            string            `json:"type"`
+		BaseURL         string            `json:"baseUrl"`
+		APIKey          *string           `json:"apiKey"`
+		Headers         map[string]string `json:"headers"`
+		ReasoningReplay *bool             `json:"reasoningReplay"`
+		Enabled         *bool             `json:"enabled"`
 	}
 	if _, ok := decodeBody(w, r, &body); !ok {
 		return
@@ -211,12 +214,17 @@ func (h *AdminResources) createProvider(w http.ResponseWriter, r *http.Request) 
 	if body.Enabled != nil {
 		enabled = *body.Enabled
 	}
+	// Opt-in, off unless the request asks for it.
+	reasoningReplay := false
+	if body.ReasoningReplay != nil {
+		reasoningReplay = *body.ReasoningReplay
+	}
 	encrypted, err := h.encryptOptional(body.APIKey)
 	if err != nil {
 		internalError(w, "encrypt provider key", err)
 		return
 	}
-	provider, err := db.CreateProvider(body.Name, body.Type, body.BaseURL, encrypted, headers, enabled)
+	provider, err := db.CreateProvider(body.Name, body.Type, body.BaseURL, encrypted, headers, reasoningReplay, enabled)
 	if err != nil {
 		if isUniqueViolation(err) {
 			conflict(w, err.Error(), "constraint_violation")
@@ -257,11 +265,12 @@ func (h *AdminResources) providerByID(w http.ResponseWriter, r *http.Request) {
 
 func (h *AdminResources) updateProvider(w http.ResponseWriter, r *http.Request, id int64) {
 	var body struct {
-		Name    *string           `json:"name"`
-		Type    *string           `json:"type"`
-		BaseURL *string           `json:"baseUrl"`
-		Headers map[string]string `json:"headers"`
-		Enabled *bool             `json:"enabled"`
+		Name            *string           `json:"name"`
+		Type            *string           `json:"type"`
+		BaseURL         *string           `json:"baseUrl"`
+		Headers         map[string]string `json:"headers"`
+		ReasoningReplay *bool             `json:"reasoningReplay"`
+		Enabled         *bool             `json:"enabled"`
 	}
 	fields, ok := decodeBody(w, r, &body)
 	if !ok {
@@ -282,10 +291,11 @@ func (h *AdminResources) updateProvider(w http.ResponseWriter, r *http.Request, 
 		}
 	}
 	patch := db.ProviderPatch{
-		Name:    body.Name,
-		Type:    body.Type,
-		BaseURL: body.BaseURL,
-		Enabled: body.Enabled,
+		Name:            body.Name,
+		Type:            body.Type,
+		BaseURL:         body.BaseURL,
+		ReasoningReplay: body.ReasoningReplay,
+		Enabled:         body.Enabled,
 	}
 	if fieldPresent(fields, "headers") {
 		headers, err := encodeProviderHeaders(body.Headers)
@@ -1048,8 +1058,8 @@ func (h *AdminResources) createAPIConfig(w http.ResponseWriter, r *http.Request)
 		ResponseTemplate: rawColumn(body.ResponseTemplate),
 		APIKey:           encrypted,
 		TimeoutMs:        timeoutMs,
-		StreamTimeoutMs:  intOr(body.StreamTimeoutMs, 0),
-		StreamMaxBodyMb:  intOr(body.StreamMaxBodyMb, 0),
+		StreamTimeoutMs:  intOr(body.StreamTimeoutMs, db.DefaultStreamTimeoutMs),
+		StreamMaxBodyMb:  intOr(body.StreamMaxBodyMb, db.DefaultStreamMaxBodyMb),
 		Route:            route,
 		Enabled:          enabled,
 	})

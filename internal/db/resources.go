@@ -36,22 +36,26 @@ type ProviderRow struct {
 	BaseURL string
 	APIKey  *string
 	// Headers is a JSON object of extra upstream headers.
-	Headers   *string
-	Enabled   bool
-	CreatedAt int64
-	UpdatedAt int64
+	Headers *string
+	// ReasoningReplay opts this provider into the reasoning round-trip (see
+	// providers/reasoning.go). Off by default.
+	ReasoningReplay bool
+	Enabled         bool
+	CreatedAt       int64
+	UpdatedAt       int64
 }
 
-const providerColumns = `id, name, type, base_url, api_key, headers, enabled, created_at, updated_at`
+const providerColumns = `id, name, type, base_url, api_key, headers, reasoning_replay, enabled, created_at, updated_at`
 
 func scanProvider(row interface{ Scan(...any) error }) (*ProviderRow, error) {
 	var (
 		provider ProviderRow
 		apiKey   sql.NullString
 		headers  sql.NullString
+		replay   int
 		enabled  int
 	)
-	if err := row.Scan(&provider.ID, &provider.Name, &provider.Type, &provider.BaseURL, &apiKey, &headers, &enabled, &provider.CreatedAt, &provider.UpdatedAt); err != nil {
+	if err := row.Scan(&provider.ID, &provider.Name, &provider.Type, &provider.BaseURL, &apiKey, &headers, &replay, &enabled, &provider.CreatedAt, &provider.UpdatedAt); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return nil, nil
 		}
@@ -63,6 +67,7 @@ func scanProvider(row interface{ Scan(...any) error }) (*ProviderRow, error) {
 	if headers.Valid {
 		provider.Headers = &headers.String
 	}
+	provider.ReasoningReplay = replay != 0
 	provider.Enabled = enabled != 0
 	return &provider, nil
 }
@@ -91,13 +96,14 @@ func GetProvider(id int64) (*ProviderRow, error) {
 }
 
 // CreateProvider inserts a provider. Headers is a JSON object of extra upstream
-// headers (nil/empty for none).
-func CreateProvider(name, kind, baseURL string, apiKey, headers *string, enabled bool) (*ProviderRow, error) {
+// headers (nil/empty for none). reasoningReplay opts into the reasoning
+// round-trip, which is off by default.
+func CreateProvider(name, kind, baseURL string, apiKey, headers *string, reasoningReplay, enabled bool) (*ProviderRow, error) {
 	now := time.Now().UnixMilli()
 	result, err := Get().Exec(
-		`INSERT INTO providers (name, type, base_url, api_key, headers, enabled, created_at, updated_at)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-		name, kind, baseURL, nullString(apiKey), nullString(headers), boolToInt(enabled), now, now,
+		`INSERT INTO providers (name, type, base_url, api_key, headers, reasoning_replay, enabled, created_at, updated_at)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		name, kind, baseURL, nullString(apiKey), nullString(headers), boolToInt(reasoningReplay), boolToInt(enabled), now, now,
 	)
 	if err != nil {
 		return nil, err
@@ -113,12 +119,14 @@ func CreateProvider(name, kind, baseURL string, apiKey, headers *string, enabled
 // ProviderPatch carries the fields an update may set. A nil pointer keeps the
 // current value; APIKeySet (with a possibly nil APIKey) replaces it.
 type ProviderPatch struct {
-	Name      *string
-	Type      *string
-	BaseURL   *string
-	Enabled   *bool
-	APIKeySet bool
-	APIKey    *string
+	Name    *string
+	Type    *string
+	BaseURL *string
+	Enabled *bool
+	// ReasoningReplay toggles the opt-in reasoning round-trip.
+	ReasoningReplay *bool
+	APIKeySet       bool
+	APIKey          *string
 	// HeadersSet replaces the current headers (with possibly nil) when true.
 	HeadersSet bool
 	Headers    *string
@@ -152,9 +160,13 @@ func UpdateProvider(id int64, patch ProviderPatch) (*ProviderRow, error) {
 	if patch.HeadersSet {
 		headers = patch.Headers
 	}
+	reasoningReplay := existing.ReasoningReplay
+	if patch.ReasoningReplay != nil {
+		reasoningReplay = *patch.ReasoningReplay
+	}
 	_, err = Get().Exec(
-		`UPDATE providers SET name = ?, type = ?, base_url = ?, api_key = ?, headers = ?, enabled = ?, updated_at = ? WHERE id = ?`,
-		name, kind, baseURL, nullString(apiKey), nullString(headers), boolToInt(enabled), time.Now().UnixMilli(), id,
+		`UPDATE providers SET name = ?, type = ?, base_url = ?, api_key = ?, headers = ?, reasoning_replay = ?, enabled = ?, updated_at = ? WHERE id = ?`,
+		name, kind, baseURL, nullString(apiKey), nullString(headers), boolToInt(reasoningReplay), boolToInt(enabled), time.Now().UnixMilli(), id,
 	)
 	if err != nil {
 		return nil, err
@@ -600,6 +612,20 @@ func DeleteAPIKey(id int64) (bool, error) {
 }
 
 // ---------------------------------------------------------------- api configs
+
+// Defaults for a /free tunnel's limits. 0 keeps its "unlimited" meaning when it
+// is sent explicitly; these only apply when a value is left out.
+const (
+	// DefaultStreamTimeoutMs bounds one tunnel request end to end (5 minutes).
+	// Without it a client or upstream that vanishes without a FIN pins the
+	// handler goroutine plus its copy buffer forever, and /free has no idle
+	// timeout of its own.
+	DefaultStreamTimeoutMs = 300_000
+	// DefaultStreamMaxBodyMb caps a tunnel upload. The tunnel streams bodies
+	// through untouched, so an unbounded one would also raise the h2c
+	// connection flow-control buffers.
+	DefaultStreamMaxBodyMb = 8
+)
 
 // APIConfigRow is one non-AI forwarding config.
 type APIConfigRow struct {

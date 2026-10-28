@@ -1,0 +1,31 @@
+[Unit]
+Description=Relay-Api gateway
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=relay
+Group=relay
+WorkingDirectory=/var/lib/relay-api
+ExecStart=/usr/local/bin/relay-api
+Restart=on-failure
+RestartSec=2
+
+# Each active /free tunnel holds a client socket *and* an upstream socket, so a
+# few thousand concurrent tunnels need several thousand descriptors. The binary
+# raises its own soft limit to MAX_OPEN_FILES, but the hard limit has to come
+# from the unit (or the container runtime).
+LimitNOFILE=65535
+
+# Soft heap ceiling. Without it the runtime can grow to ~2x the live heap before
+# collecting, which is what turns a burst of 256 KiB tunnel buffers into an OOM
+# kill. Size it to roughly 60-75% of the cgroup memory limit.
+Environment=GOMEMLIMIT=1200MiB
+
+Environment=PORT=5630
+Environment=DATABASE_PATH=/var/lib/relay-api/data/gateway.db
+Environment=SECRET_KEY_FILE=/var/lib/relay-api/data/.secret-key
+
+[Install]
+WantedBy=multi-user.target

@@ -111,8 +111,9 @@ func (g *Gateway) responses(w http.ResponseWriter, r *http.Request) {
 	var upstreamHeaders map[string]string
 
 	baseRequest := providers.Request{
-		Stream:  stream,
-		Session: middleware.AISessionFrom(r.Context()),
+		Stream:      stream,
+		ClientModel: model,
+		Session:     middleware.AISessionFrom(r.Context()),
 		OnUpstreamHeaders: func(headers map[string]string) {
 			upstreamHeaders = headers
 		},
@@ -136,13 +137,15 @@ func (g *Gateway) responses(w http.ResponseWriter, r *http.Request) {
 			clientHeaders = clientHeaderMap(r.Header)
 		}
 		meta := responsesMeta{
-			requestID:      requestID,
-			apiKeyID:       apiKeyID,
-			model:          model,
-			provider:       route.Provider.Name,
-			startedAt:      startedAt,
-			requestHeaders: r.Header,
-			stream:         stream,
+			requestID:       requestID,
+			apiKeyID:        apiKeyID,
+			model:           model,
+			provider:        route.Provider.Name,
+			session:         middleware.AISessionFrom(r.Context()),
+			startedAt:       startedAt,
+			requestHeaders:  r.Header,
+			stream:          stream,
+			reasoningReplay: providerCfg.ReasoningReplay,
 		}
 
 		// A `responses` provider speaks the Responses protocol natively: forward
@@ -613,10 +616,14 @@ type responsesMeta struct {
 	apiKeyID        int64
 	model           string
 	provider        string
+	session         string
 	startedAt       time.Time
 	requestHeaders  http.Header
 	upstreamHeaders map[string]string
 	stream          bool
+	// reasoningReplay mirrors the provider's opt-in so the stream wrapper only
+	// caches reasoning for providers that asked for it.
+	reasoningReplay bool
 }
 
 func buildResponsesOutput(result *providers.Result, customTools map[string]bool) ([]any, responsesUsage) {
@@ -976,6 +983,18 @@ readLoop:
 		g.recordAI(meta.requestID, meta.apiKeyID, meta.model, meta.provider, &providers.Usage{}, meta.startedAt, status, true, &failureMessage, meta.requestHeaders, meta.upstreamHeaders)
 		return
 	}
+	if meta.reasoningReplay && reasoningText.Len() > 0 {
+		// Remember the turn so a client that drops reasoning from its history
+		// (OpenCode and most agents do) still gets it re-attached next time.
+		ids := make([]string, 0, len(toolOrder))
+		for _, index := range toolOrder {
+			if call := toolCalls[index]; call != nil && call.id != "" {
+				ids = append(ids, call.id)
+			}
+		}
+		providers.RememberReasoning(meta.provider, meta.model, meta.session, text.String(), ids, reasoningText.String())
+	}
+
 	output := make([]any, 0, 3+len(toolOrder))
 	if reasoningStarted {
 		emit("response.reasoning_summary_text.done", map[string]any{

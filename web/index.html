@@ -154,12 +154,12 @@
             <option value="anthropic">anthropic</option>
             <option value="compatible">compatible</option>
             <option value="openai-responses">openai-responses</option>
-        <option value="responses">responses (pass-through)</option>
             <option value="responses">responses (pass-through)</option>
           </select>
           <input name="baseUrl" placeholder="https://api.example.com/v1" required>
           <input name="apiKey" placeholder="API key (optional)" autocomplete="off">
           <input name="headers" placeholder='headers JSON e.g. {"x-user-id":"${uuid}"}' autocomplete="off">
+          <label class="check-row"><input type="checkbox" name="reasoningReplay"> reasoning replay</label>
           <button type="submit">Add</button>
         </form>
         <div class="table-wrap">
@@ -442,11 +442,13 @@
           <option value="anthropic">anthropic</option>
           <option value="compatible">compatible</option>
           <option value="openai-responses">openai-responses</option>
+          <option value="responses">responses (pass-through)</option>
         </select>
         <input name="baseUrl" placeholder="https://api.example.com/v1" required>
         <input name="apiKey" placeholder="new API key (leave blank to keep)" autocomplete="off">
         <input name="headers" placeholder='headers JSON e.g. {"x-user-id":"${uuid}"}' autocomplete="off">
         <p class="hint">Header values may use <code>${client_header}</code> and <code>${_ai_session}</code>.</p>
+        <label class="check-row"><input type="checkbox" name="reasoningReplay"> reasoning replay (re-attach dropped reasoning_content on later turns)</label>
         <label class="check-row"><input type="checkbox" name="enabled"> enabled</label>
       </div>
       <div class="dialog-actions">
@@ -480,8 +482,8 @@
           <option value="open">/open/* — API key required</option>
           <option value="free">/free/* — public, no key</option>
         </select>
-        <input name="streamTimeoutMs" type="number" min="0" placeholder="stream timeout ms on /free (0 = no timeout)">
-        <input name="streamMaxBodyMb" type="number" min="0" placeholder="stream body limit MB on /free (0 = unlimited)">
+        <input name="streamTimeoutMs" type="number" min="0" placeholder="stream timeout ms on /free (blank = 300000 = 5 min; 0 = no timeout)">
+        <input name="streamMaxBodyMb" type="number" min="0" placeholder="stream body limit MB on /free (blank = 8; 0 = unlimited)">
         <input name="apiKey" placeholder="upstream key (optional)" autocomplete="off">
         <input name="headers" placeholder='{"Authorization":"Bearer ..."} (JSON, optional)'>
         <input name="requestTemplate" placeholder='{"city":"{{body.city}}"} (JSON, optional)'>

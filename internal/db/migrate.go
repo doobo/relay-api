@@ -19,6 +19,9 @@ CREATE TABLE IF NOT EXISTS providers (
   /* Extra upstream headers as a JSON object; values may reference client
      headers with ${name} and the resolved identity with ${_ai_session}. */
   headers TEXT,
+  /* Opt-in: remember this provider's reasoning and re-attach it when the
+     client drops it from the next request (see providers/reasoning.go). */
+  reasoning_replay INTEGER NOT NULL DEFAULT 0,
   enabled INTEGER DEFAULT 1,
   created_at INTEGER NOT NULL,
   updated_at INTEGER NOT NULL
@@ -77,9 +80,11 @@ CREATE TABLE IF NOT EXISTS api_configs (
   response_template TEXT,
   api_key TEXT,
   timeout_ms INTEGER DEFAULT 15000,
-  /* Limits for the /free streaming tunnel only. 0 means unlimited. */
-  stream_timeout_ms INTEGER NOT NULL DEFAULT 0,
-  stream_max_body_mb INTEGER NOT NULL DEFAULT 0,
+  /* Limits for the /free streaming tunnel only. 0 means unlimited.
+     Keep the defaults in sync with DefaultStreamTimeoutMs /
+     DefaultStreamMaxBodyMb in resources.go. */
+  stream_timeout_ms INTEGER NOT NULL DEFAULT 300000,
+  stream_max_body_mb INTEGER NOT NULL DEFAULT 8,
   /* Mount point: 'open' (API key required) or 'free' (public). */
   route TEXT DEFAULT 'open',
   enabled INTEGER DEFAULT 1,
@@ -185,6 +190,10 @@ func Migrate(db *sql.DB) error {
 		if err := ensureColumn(tx, "providers", "headers", "TEXT"); err != nil {
 			return err
 		}
+		// Added with the opt-in reasoning replay (default off).
+		if err := ensureColumn(tx, "providers", "reasoning_replay", "INTEGER NOT NULL DEFAULT 0"); err != nil {
+			return err
+		}
 		// Added with the forwarding usage column.
 		if err := ensureColumn(tx, "usage_logs", "target_url", "TEXT"); err != nil {
 			return err
@@ -201,14 +210,18 @@ func Migrate(db *sql.DB) error {
 			return err
 		}
 		// Added with the /free streaming tunnel.
-		if err := ensureColumn(tx, "api_configs", "stream_timeout_ms", "INTEGER NOT NULL DEFAULT 0"); err != nil {
+		if err := ensureColumn(tx, "api_configs", "stream_timeout_ms", "INTEGER NOT NULL DEFAULT 300000"); err != nil {
 			return err
 		}
-		if err := ensureColumn(tx, "api_configs", "stream_max_body_mb", "INTEGER NOT NULL DEFAULT 0"); err != nil {
+		if err := ensureColumn(tx, "api_configs", "stream_max_body_mb", "INTEGER NOT NULL DEFAULT 8"); err != nil {
 			return err
 		}
 		// Added with account roles; pre-existing accounts were full admins.
-		return ensureColumn(tx, "admin_users", "role", "TEXT NOT NULL DEFAULT 'admin'")
+		if err := ensureColumn(tx, "admin_users", "role", "TEXT NOT NULL DEFAULT 'admin'"); err != nil {
+			return err
+		}
+		// Added with the bounded /free defaults.
+		return backfillTunnelDefaults(tx)
 	}); err != nil {
 		return err
 	}
@@ -224,6 +237,41 @@ func Migrate(db *sql.DB) error {
 	// stats endpoints fall back to SQL.
 	if err := initLiveStats(); err != nil {
 		slog.Warn("seed live usage stats", "error", err)
+	}
+	return nil
+}
+
+// tunnelDefaultsVersion is the PRAGMA user_version marker for the one-time
+// switch from "unlimited by default" to bounded /free tunnel limits. Keeping it
+// in user_version means a deliberate 0 (unlimited, set through the admin UI
+// after this migration) survives restarts instead of being overwritten.
+const tunnelDefaultsVersion = 1
+
+// backfillTunnelDefaults gives configs created before the bounded defaults
+// (which stored the then-default 0, i.e. "no timeout" and "no body cap") the
+// new protective values once. Runs at most once per database.
+func backfillTunnelDefaults(tx *sql.Tx) error {
+	var version int
+	if err := tx.QueryRow("PRAGMA user_version").Scan(&version); err != nil {
+		return fmt.Errorf("read user_version: %w", err)
+	}
+	if version >= tunnelDefaultsVersion {
+		return nil
+	}
+	if _, err := tx.Exec(
+		`UPDATE api_configs SET stream_timeout_ms = ? WHERE route = 'free' AND stream_timeout_ms <= 0`,
+		DefaultStreamTimeoutMs,
+	); err != nil {
+		return fmt.Errorf("backfill stream_timeout_ms: %w", err)
+	}
+	if _, err := tx.Exec(
+		`UPDATE api_configs SET stream_max_body_mb = ? WHERE route = 'free' AND stream_max_body_mb <= 0`,
+		DefaultStreamMaxBodyMb,
+	); err != nil {
+		return fmt.Errorf("backfill stream_max_body_mb: %w", err)
+	}
+	if _, err := tx.Exec(fmt.Sprintf("PRAGMA user_version = %d", tunnelDefaultsVersion)); err != nil {
+		return fmt.Errorf("set user_version: %w", err)
 	}
 	return nil
 }

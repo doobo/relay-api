@@ -8,12 +8,14 @@ import (
 	"net/http/httptest"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 
 	"relay-api/internal/config"
 	"relay-api/internal/db"
 	"relay-api/internal/httperr"
 	"relay-api/internal/middleware"
+	"relay-api/internal/providers"
 	"relay-api/internal/router"
 	"relay-api/internal/util"
 )
@@ -59,13 +61,31 @@ func TestGateway(t *testing.T) {
 	}))
 	defer headerUpstream.Close()
 
+	// A DeepSeek-style reasoning upstream: it streams reasoning_content, text and
+	// a tool call, and records what the gateway sends on the next turn.
+	var replayMu sync.Mutex
+	var replaySeen []byte
+	replayUpstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		replayMu.Lock()
+		replaySeen = body
+		replayMu.Unlock()
+		w.Header().Set("content-type", "text/event-stream")
+		_, _ = io.WriteString(w, "data: {\"choices\":[{\"delta\":{\"reasoning_content\":\"think-1\"}}]}\n\n")
+		_, _ = io.WriteString(w, "data: {\"choices\":[{\"delta\":{\"content\":\"hello\"}}]}\n\n")
+		_, _ = io.WriteString(w, `data: {"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_9","function":{"name":"t","arguments":"{}"}}]}}]}`+"\n\n")
+		_, _ = io.WriteString(w, "data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"tool_calls\"}],\"usage\":{\"prompt_tokens\":1,\"completion_tokens\":1,\"total_tokens\":2}}\n\n")
+		_, _ = io.WriteString(w, "data: [DONE]\n\n")
+	}))
+	defer replayUpstream.Close()
+
 	badProvider := mustProvider(t, "bad", "openai", bad.URL)
 	goodProvider := mustProvider(t, "good", "openai", good.URL)
 	anthropicProvider := mustProvider(t, "claude", "anthropic", good.URL)
 	responsesProvider := mustProvider(t, "responses", "openai-responses", good.URL)
 	rejectProvider := mustProvider(t, "reject", "openai", reject.URL)
 	headersJSON := `{"x-user-id":"${x-user-id}","x-session":"${_ai_session}","x-static":"fixed"}`
-	headerProviderRow, err := db.CreateProvider("headers", "openai", headerUpstream.URL, nil, &headersJSON, true)
+	headerProviderRow, err := db.CreateProvider("headers", "openai", headerUpstream.URL, nil, &headersJSON, false, true)
 	if err != nil {
 		t.Fatalf("create header provider: %v", err)
 	}
@@ -88,6 +108,16 @@ func TestGateway(t *testing.T) {
 	if _, err := db.CreateModel("hdrs", headerProviderRow.ID, "upstream-model", true, 100); err != nil {
 		t.Fatalf("create model: %v", err)
 	}
+	replayProvider := mustProvider(t, "replay", "openai", replayUpstream.URL)
+	replayEnabled := true
+	if _, err := db.UpdateProvider(replayProvider, db.ProviderPatch{ReasoningReplay: &replayEnabled}); err != nil {
+		t.Fatalf("enable reasoning replay: %v", err)
+	}
+	if _, err := db.CreateModel("replay", replayProvider, "replay-model", true, 100); err != nil {
+		t.Fatalf("create model: %v", err)
+	}
+	providers.ResetReasoningCache()
+	t.Cleanup(providers.ResetReasoningCache)
 
 	fullKey := "sk-test-key-123456"
 	if _, err := db.CreateAPIKey(db.NewAPIKey{
@@ -258,6 +288,35 @@ func TestGateway(t *testing.T) {
 		}
 	})
 
+	t.Run("reasoning is replayed to upstreams that require it", func(t *testing.T) {
+		tools := `"tools":[{"type":"function","function":{"name":"t","parameters":{"type":"object","properties":{}}}}]`
+		// Turn 1: reasoning comes back to the client.
+		first := do(t, `{"model":"replay","stream":true,`+tools+`,"messages":[{"role":"user","content":"go"}]}`)
+		if first.Code != http.StatusOK {
+			t.Fatalf("turn 1 status = %d, body = %s", first.Code, first.Body.String())
+		}
+		if !strings.Contains(first.Body.String(), "think-1") {
+			t.Fatalf("reasoning was not forwarded to the client: %s", first.Body.String())
+		}
+
+		// Turn 2: the client drops reasoning_content from the history (what
+		// OpenCode and most agents do), which used to 400 upstream.
+		second := do(t, `{"model":"replay","stream":true,`+tools+`,"messages":[`+
+			`{"role":"user","content":"go"},`+
+			`{"role":"assistant","content":"hello","tool_calls":[{"id":"call_9","type":"function","function":{"name":"t","arguments":"{}"}}]},`+
+			`{"role":"tool","tool_call_id":"call_9","content":"ok"}]}`)
+		if second.Code != http.StatusOK {
+			t.Fatalf("turn 2 status = %d, body = %s", second.Code, second.Body.String())
+		}
+
+		replayMu.Lock()
+		seen := string(replaySeen)
+		replayMu.Unlock()
+		if !strings.Contains(seen, `"reasoning_content":"think-1"`) {
+			t.Fatalf("reasoning was not replayed upstream: %s", seen)
+		}
+	})
+
 	t.Run("custom provider headers use client values and session", func(t *testing.T) {
 		request := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(`{"model":"hdrs","messages":[{"role":"user","content":"hi"}]}`))
 		request.Header.Set("Authorization", "Bearer "+fullKey)
@@ -385,7 +444,7 @@ func TestGateway(t *testing.T) {
 
 func mustProvider(t *testing.T, name, kind, baseURL string) int64 {
 	t.Helper()
-	provider, err := db.CreateProvider(name, kind, baseURL, nil, nil, true)
+	provider, err := db.CreateProvider(name, kind, baseURL, nil, nil, false, true)
 	if err != nil {
 		t.Fatalf("create provider %s: %v", name, err)
 	}

@@ -48,6 +48,22 @@ func main() {
 		os.Exit(1)
 	}
 
+	// A /free tunnel holds a client socket and an upstream socket at once, so a
+	// few thousand concurrent tunnels need several thousand descriptors. Raise
+	// the soft limit to the hard limit here so the deployment does not have to
+	// remember LimitNOFILE (MAX_OPEN_FILES tunes the target).
+	before, after, err := util.RaiseFileLimit(uint64(cfg.MaxOpenFiles))
+	switch {
+	case err != nil:
+		slog.Debug("open-file limit unchanged", "error", err)
+	case after > before:
+		slog.Info("raised open-file limit", "from", before, "to", after)
+	}
+	if after > 0 && after < 8192 {
+		slog.Warn("open-file limit is low for the /free tunnel",
+			"limit", after, "hint", "raise LimitNOFILE in the unit or MAX_OPEN_FILES")
+	}
+
 	database, err := db.Open(cfg.DatabasePath)
 	if err != nil {
 		fatal("open database", "path", cfg.DatabasePath, "error", err)

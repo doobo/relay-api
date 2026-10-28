@@ -30,7 +30,10 @@ type Config struct {
 	Headers map[string]string
 	// HeaderTemplates is Headers pre-parsed by the resolver. Nil falls back to
 	// compiling Headers per request (tests and directly constructed configs).
-	HeaderTemplates  []HeaderTemplate
+	HeaderTemplates []HeaderTemplate
+	// ReasoningReplay opts this provider into remembering and re-attaching
+	// reasoning_content across turns (see reasoning.go). Off by default.
+	ReasoningReplay  bool
 	RequestTimeoutMs int
 	// HeaderTimeoutMs bounds the wait for response headers on streaming
 	// calls. Zero disables it.

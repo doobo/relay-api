@@ -61,6 +61,29 @@ func TestAsyncWriterFlushesOnInterval(t *testing.T) {
 	}
 }
 
+func TestAsyncWriterFlushesAfterBatchLines(t *testing.T) {
+	dst := &lockedBuffer{}
+	// A huge byte cap and a one-hour ticker: only the 100-line cap can make
+	// these records visible in time.
+	writer := NewAsyncWriter(dst, Options{
+		QueueSize: 256, BatchSize: 1 << 20, BatchLines: 100, FlushEvery: time.Hour,
+	})
+	defer func() { _ = writer.Close() }()
+
+	for index := 0; index < 100; index++ {
+		if _, err := writer.Write([]byte("x\n")); err != nil {
+			t.Fatalf("write: %v", err)
+		}
+	}
+	deadline := time.Now().Add(time.Second)
+	for strings.Count(dst.String(), "\n") < 100 {
+		if time.Now().After(deadline) {
+			t.Fatalf("100 lines were not flushed, got %d", strings.Count(dst.String(), "\n"))
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+}
+
 // blockingWriter holds every write until release is closed, simulating a log
 // pipe whose consumer stopped reading.
 type blockingWriter struct {

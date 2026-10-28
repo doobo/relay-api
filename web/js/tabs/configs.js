@@ -177,11 +177,14 @@ export function initConfigs() {
       url: form.elements.url.value,
       method: getMethodValue(form.elements.method, form.elements.customMethod) || "POST",
       route: form.elements.route.value,
-      // /free tunnel limits; 0 on both means unlimited. Ignored by /open.
-      streamTimeoutMs: nonNegativeInt(form.elements.streamTimeoutMs.value),
-      streamMaxBodyMb: nonNegativeInt(form.elements.streamMaxBodyMb.value),
       enabled: form.elements.enabled.checked,
     };
+    // /free tunnel limits: blank leaves the field out so the server applies its
+    // default (5 minutes / 8 MB); an explicit 0 means unlimited.
+    const streamTimeoutMs = form.elements.streamTimeoutMs.value.trim();
+    const streamMaxBodyMb = form.elements.streamMaxBodyMb.value.trim();
+    if (streamTimeoutMs !== "") body.streamTimeoutMs = nonNegativeInt(streamTimeoutMs);
+    if (streamMaxBodyMb !== "") body.streamMaxBodyMb = nonNegativeInt(streamMaxBodyMb);
     // undefined = field unchanged (server keeps existing); null = cleared.
     if (headers !== undefined) body.headers = headers;
     if (requestTemplate !== undefined) body.requestTemplate = requestTemplate;

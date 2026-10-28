@@ -76,6 +76,11 @@ type Config struct {
 
 	LogLevel LogLevel
 
+	// MaxOpenFiles is the soft RLIMIT_NOFILE the process raises itself to at
+	// startup (Linux/macOS). Each active /free tunnel holds a client and an
+	// upstream socket, so a few thousand tunnels need several thousand fds.
+	MaxOpenFiles int
+
 	// RequestSizeLimitBytes caps bodies on /v1/* and /open/*.
 	RequestSizeLimitBytes int64
 	// RequestTimeoutMs is the upstream timeout for non-streaming chat calls and
@@ -138,6 +143,7 @@ func Load() Config {
 		AdminSessionTTLMs:         int64(intEnv("ADMIN_SESSION_TTL_HOURS", 24)) * 3_600_000,
 		AdminLoginRateLimit:       intEnv("ADMIN_LOGIN_RATE_LIMIT", 10),
 		LogLevel:                  parseLogLevel(os.Getenv("LOG_LEVEL")),
+		MaxOpenFiles:              intEnv("MAX_OPEN_FILES", 65535),
 		RequestSizeLimitBytes:     int64(intEnv("REQUEST_SIZE_LIMIT_MB", 10)) * 1024 * 1024,
 		RequestTimeoutMs:          intEnv("REQUEST_TIMEOUT_MS", 120_000),
 		StreamIdleTimeoutMs:       intEnv("STREAM_IDLE_TIMEOUT_MS", 60_000),

@@ -36,7 +36,7 @@ func TestResolverCacheInvalidation(t *testing.T) {
 	if err != nil {
 		t.Fatalf("encrypt: %v", err)
 	}
-	provider, err := db.CreateProvider("p", "openai", "https://first.example", &encrypted, nil, true)
+	provider, err := db.CreateProvider("p", "openai", "https://first.example", &encrypted, nil, false, true)
 	if err != nil {
 		t.Fatalf("create provider: %v", err)
 	}

@@ -1,7 +1,9 @@
 package routes
 
 import (
+	"context"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"strconv"
@@ -256,11 +258,27 @@ func (h *TunnelRoutes) handle(w http.ResponseWriter, r *http.Request) {
 	}
 	w.Header().Set("X-Request-ID", requestID)
 	w.WriteHeader(response.StatusCode)
-	copyAndFlush(w, response.Body)
 	// Recorded after the response is copied: the usage write no longer sits
 	// between the client and its first byte (and, being async, does not block
-	// the handler on the single SQLite connection either).
-	record(response.StatusCode, nil)
+	// the handler on the single SQLite connection either). A stream cut short
+	// by the configured timeout or by the client leaving is recorded as such
+	// instead of as a clean 200.
+	copyErr := copyAndFlush(w, response.Body)
+	switch {
+	case copyErr == nil:
+		record(response.StatusCode, nil)
+	case errors.Is(copyErr, errClientDisconnected):
+		message := "client disconnected"
+		record(499, &message)
+	default:
+		message := copyErr.Error()
+		if errors.Is(copyErr, context.DeadlineExceeded) {
+			// A timeout that fires mid-stream arrives here as a body read
+			// error; name it explicitly so the usage row is diagnosable.
+			message = fmt.Sprintf("%v after %dms", util.ErrUpstreamTimeout, apiConfig.StreamTimeoutMs)
+		}
+		record(http.StatusGatewayTimeout, &message)
+	}
 }
 
 // writeTooLarge renders the shared 400 for an over-limit tunnel body.
@@ -294,9 +312,16 @@ func (b *limitedBody) Read(p []byte) (int, error) {
 // relay into one syscall/DATA frame per chunk; a larger buffer plus a throttle
 // keeps the response prompt while cutting the flush count by an order of
 // magnitude.
+//
+// The buffer is held for the whole response, including while blocked on a read
+// with nothing to relay, so its size multiplies by the number of concurrent
+// tunnels: 3000 idle XHTTP streams at 256 KiB alone would be 750 MiB. 64 KiB
+// still saturates a bulk relay while keeping that worst case near 190 MiB, and
+// GOMEMLIMIT (see README) makes the runtime return pooled buffers under
+// pressure.
 const (
-	tunnelCopyBuffer    = 256 * 1024
-	tunnelFlushBytes    = 64 * 1024
+	tunnelCopyBuffer    = 64 * 1024
+	tunnelFlushBytes    = 32 * 1024
 	tunnelFlushInterval = 200 * time.Microsecond
 )
 
@@ -310,16 +335,26 @@ var tunnelBufferPool = sync.Pool{
 	},
 }
 
+// errClientDisconnected marks a tunnel copy that failed writing to the client
+// rather than reading from upstream, so the usage row can record 499.
+var errClientDisconnected = errors.New("client disconnected")
+
 // copyAndFlush streams src into w so a long-lived response is delivered as it
 // is produced. It flushes once enough has accumulated, once a short read shows
 // nothing more is buffered upstream (so the client sees it immediately), or
 // once the last flush is getting stale. Without a flusher it degrades to
 // io.Copy.
-func copyAndFlush(w http.ResponseWriter, src io.Reader) {
+//
+// It returns nil on a clean end of stream, errClientDisconnected when the
+// client went away, and the read error otherwise (an upstream reset, or the
+// configured stream timeout expiring mid-response).
+func copyAndFlush(w http.ResponseWriter, src io.Reader) error {
 	flusher, _ := w.(http.Flusher)
 	if flusher == nil {
-		_, _ = io.Copy(w, src)
-		return
+		if _, err := io.Copy(w, src); err != nil {
+			return err
+		}
+		return nil
 	}
 	bufferPtr := tunnelBufferPool.Get().(*[]byte)
 	defer tunnelBufferPool.Put(bufferPtr)
@@ -330,7 +365,7 @@ func copyAndFlush(w http.ResponseWriter, src io.Reader) {
 		n, err := src.Read(buffer)
 		if n > 0 {
 			if _, writeErr := w.Write(buffer[:n]); writeErr != nil {
-				return
+				return fmt.Errorf("%w: %v", errClientDisconnected, writeErr)
 			}
 			pending += n
 		}
@@ -342,7 +377,10 @@ func copyAndFlush(w http.ResponseWriter, src io.Reader) {
 			lastFlush = time.Now()
 		}
 		if err != nil {
-			return
+			if errors.Is(err, io.EOF) {
+				return nil
+			}
+			return err
 		}
 	}
 }

@@ -107,7 +107,7 @@ func TestAIResourceGenerationMovesOnWrites(t *testing.T) {
 	openHotCacheTestDB(t)
 
 	before := AIResourceGeneration()
-	provider, err := CreateProvider("p", "openai", "http://example.com", nil, nil, true)
+	provider, err := CreateProvider("p", "openai", "http://example.com", nil, nil, false, true)
 	if err != nil {
 		t.Fatalf("create provider: %v", err)
 	}

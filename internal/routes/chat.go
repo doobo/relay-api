@@ -152,13 +152,15 @@ func (g *Gateway) chat(w http.ResponseWriter, r *http.Request) {
 			}
 			g.breaker.Success(key)
 			g.writeStream(w, r, upstream, cancelStream, streamMeta{
-				requestID:       requestID,
-				apiKeyID:        apiKeyID,
-				model:           model,
-				provider:        route.Provider.Name,
-				startedAt:       startedAt,
-				requestHeaders:  r.Header,
-				upstreamHeaders: upstreamHeaders,
+				requestID:        requestID,
+				apiKeyID:         apiKeyID,
+				model:            model,
+				provider:         route.Provider.Name,
+				session:          middleware.AISessionFrom(r.Context()),
+				startedAt:        startedAt,
+				requestHeaders:   r.Header,
+				upstreamHeaders:  upstreamHeaders,
+				captureReasoning: providerCfg.ReasoningReplay && chatWantsReasoning(middleware.RequestBody(r.Context())),
 			})
 			return
 		}
@@ -299,9 +301,36 @@ type streamMeta struct {
 	apiKeyID        int64
 	model           string
 	provider        string
+	session         string
 	startedAt       time.Time
 	requestHeaders  http.Header
 	upstreamHeaders map[string]string
+	// captureReasoning turns on delta accumulation so the reasoning of this
+	// turn can be replayed when the client drops it from the next request (see
+	// providers/reasoning.go).
+	captureReasoning bool
+}
+
+// chatAssistantMarker detects a non-first turn without decoding the body: only
+// then can an upstream demand the previous assistant turn's reasoning back.
+var (
+	chatAssistantMarker = []byte(`"assistant"`)
+	chatToolsMarker     = []byte(`"tools"`)
+)
+
+// chatWantsReasoning reports whether this request may produce reasoning whose
+// text a later turn has to replay. Tool-carrying (agent) bodies always qualify;
+// other multi-turn bodies are captured as well because some upstreams demand the
+// reasoning regardless of tools.
+func chatWantsReasoning(body []byte) bool {
+	return bytes.Contains(body, chatToolsMarker) || bytes.Contains(body, chatAssistantMarker)
+}
+
+// chatTurnCapture accumulates one assistant turn from SSE deltas.
+type chatTurnCapture struct {
+	content   strings.Builder
+	reasoning strings.Builder
+	toolIDs   []string
 }
 
 // writeStream forwards the upstream SSE stream chunk by chunk, enforcing an
@@ -318,14 +347,28 @@ func (g *Gateway) writeStream(w http.ResponseWriter, r *http.Request, upstream *
 	w.WriteHeader(http.StatusOK)
 
 	promptTokens, completionTokens := 0, 0
+	var turn chatTurnCapture
 	parser := util.NewFilteredSSEParser(func(event util.SSEEvent) {
 		var parsed struct {
 			Usage *struct {
 				PromptTokens     int `json:"prompt_tokens"`
 				CompletionTokens int `json:"completion_tokens"`
 			} `json:"usage"`
+			Choices []struct {
+				Delta struct {
+					Content          *string `json:"content"`
+					ReasoningContent *string `json:"reasoning_content"`
+					Reasoning        *string `json:"reasoning"`
+					ToolCalls        []struct {
+						ID string `json:"id"`
+					} `json:"tool_calls"`
+				} `json:"delta"`
+			} `json:"choices"`
 		}
-		if err := json.Unmarshal([]byte(event.Data), &parsed); err == nil && parsed.Usage != nil {
+		if err := json.Unmarshal([]byte(event.Data), &parsed); err != nil {
+			return
+		}
+		if parsed.Usage != nil {
 			if parsed.Usage.PromptTokens > 0 {
 				promptTokens = parsed.Usage.PromptTokens
 			}
@@ -333,7 +376,30 @@ func (g *Gateway) writeStream(w http.ResponseWriter, r *http.Request, upstream *
 				completionTokens = parsed.Usage.CompletionTokens
 			}
 		}
+		if !meta.captureReasoning {
+			return
+		}
+		for _, choice := range parsed.Choices {
+			delta := choice.Delta
+			if delta.Content != nil {
+				turn.content.WriteString(*delta.Content)
+			}
+			switch {
+			case delta.ReasoningContent != nil:
+				turn.reasoning.WriteString(*delta.ReasoningContent)
+			case delta.Reasoning != nil:
+				turn.reasoning.WriteString(*delta.Reasoning)
+			}
+			for _, call := range delta.ToolCalls {
+				if call.ID != "" {
+					turn.toolIDs = append(turn.toolIDs, call.ID)
+				}
+			}
+		}
 	}, func(raw []byte) bool {
+		if meta.captureReasoning {
+			return true
+		}
 		// Most chunks carry no usage object; skip SSE line parsing and the JSON
 		// decode unless the key is present at all.
 		return bytes.Contains(raw, chatUsageMarker)
@@ -390,6 +456,12 @@ readLoop:
 				break readLoop
 			}
 		}
+	}
+
+	if meta.captureReasoning && turn.reasoning.Len() > 0 {
+		// Cache the turn so the next request can restore the reasoning the
+		// client will almost certainly drop from its history.
+		providers.RememberReasoning(meta.provider, meta.model, meta.session, turn.content.String(), turn.toolIDs, turn.reasoning.String())
 	}
 
 	g.recordAI(meta.requestID, meta.apiKeyID, meta.model, meta.provider, &providers.Usage{

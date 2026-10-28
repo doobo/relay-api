@@ -65,7 +65,7 @@ func decodeInto(t *testing.T, recorder *httptest.ResponseRecorder, dst any) {
 
 func TestAdminModelRoutes(t *testing.T) {
 	harness := newAdminHarness(t)
-	provider, err := db.CreateProvider("p1", "openai", "https://example.com", nil, nil, true)
+	provider, err := db.CreateProvider("p1", "openai", "https://example.com", nil, nil, false, true)
 	if err != nil {
 		t.Fatalf("create provider: %v", err)
 	}
