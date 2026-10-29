@@ -142,6 +142,7 @@ func (g *Gateway) responses(w http.ResponseWriter, r *http.Request) {
 			model:           model,
 			provider:        route.Provider.Name,
 			session:         middleware.AISessionFrom(r.Context()),
+			clientIP:        util.ClientIP(r),
 			startedAt:       startedAt,
 			requestHeaders:  r.Header,
 			stream:          stream,
@@ -274,7 +275,7 @@ func (g *Gateway) responses(w http.ResponseWriter, r *http.Request) {
 			CompletionTokens: usage.output,
 			TotalTokens:      usage.total,
 		}
-		g.recordAI(requestID, apiKeyID, model, route.Provider.Name, recordUsage, startedAt, http.StatusOK, false, nil, r.Header, upstreamHeaders)
+		g.recordAI(requestID, apiKeyID, model, route.Provider.Name, recordUsage, startedAt, http.StatusOK, false, nil, r.Header, upstreamHeaders, util.ClientIP(r))
 		return
 	}
 
@@ -617,6 +618,7 @@ type responsesMeta struct {
 	model           string
 	provider        string
 	session         string
+	clientIP        string
 	startedAt       time.Time
 	requestHeaders  http.Header
 	upstreamHeaders map[string]string
@@ -980,7 +982,7 @@ readLoop:
 		failed := buildResponsesResponse(responseID, meta.model, "failed", []any{}, responsesUsage{}, raw, createdAt)
 		failed["error"] = map[string]any{"code": "upstream_error", "message": failureMessage}
 		emit("response.failed", map[string]any{"type": "response.failed", "response": failed})
-		g.recordAI(meta.requestID, meta.apiKeyID, meta.model, meta.provider, &providers.Usage{}, meta.startedAt, status, true, &failureMessage, meta.requestHeaders, meta.upstreamHeaders)
+		g.recordAI(meta.requestID, meta.apiKeyID, meta.model, meta.provider, &providers.Usage{}, meta.startedAt, status, true, &failureMessage, meta.requestHeaders, meta.upstreamHeaders, meta.clientIP)
 		return
 	}
 	if meta.reasoningReplay && reasoningText.Len() > 0 {
@@ -1079,7 +1081,7 @@ readLoop:
 		PromptTokens:     usage.input,
 		CompletionTokens: usage.output,
 		TotalTokens:      usage.total,
-	}, meta.startedAt, http.StatusOK, true, nil, meta.requestHeaders, meta.upstreamHeaders)
+	}, meta.startedAt, http.StatusOK, true, nil, meta.requestHeaders, meta.upstreamHeaders, meta.clientIP)
 }
 
 // responsesUsagePayload mirrors the usage object both in a non-streaming
@@ -1116,7 +1118,7 @@ func (g *Gateway) writeResponsesPassthrough(w http.ResponseWriter, r *http.Reque
 		if usage.TotalTokens == 0 {
 			usage.TotalTokens = usage.PromptTokens + usage.CompletionTokens
 		}
-		g.recordAI(meta.requestID, meta.apiKeyID, meta.model, meta.provider, usage, meta.startedAt, status, meta.stream, errMsg, meta.requestHeaders, meta.upstreamHeaders)
+		g.recordAI(meta.requestID, meta.apiKeyID, meta.model, meta.provider, usage, meta.startedAt, status, meta.stream, errMsg, meta.requestHeaders, meta.upstreamHeaders, meta.clientIP)
 	}
 
 	if !meta.stream {

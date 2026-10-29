@@ -20,6 +20,7 @@ type UsageLogRow struct {
 	Provider     *string
 	APIConfigID  *int64
 	TargetURL    *string
+	ClientIP     *string
 	InputTokens  int
 	OutputTokens int
 	TotalTokens  int
@@ -40,13 +41,16 @@ type UsageFilters struct {
 	Model    string
 	Provider string
 	Kind     string
+	// ClientIP matches the caller address by substring, so a partial IPv4 or
+	// IPv6 prefix narrows the log instead of requiring the exact address.
+	ClientIP string
 	Status   *int
 	Since    *int64
 	// APIKeyID narrows to one client key (nil = every key).
 	APIKeyID *int64
 }
 
-const usageLogColumns = `id, request_id, api_key_id, kind, model, provider, api_config_id, target_url,
+const usageLogColumns = `id, request_id, api_key_id, kind, model, provider, api_config_id, target_url, client_ip,
 	input_tokens, output_tokens, total_tokens, latency_ms, status, stream, error,
 	request_headers, upstream_headers, created_at`
 
@@ -58,6 +62,7 @@ func scanUsageLog(row interface{ Scan(...any) error }) (*UsageLogRow, error) {
 		provider        sql.NullString
 		configID        sql.NullInt64
 		targetURL       sql.NullString
+		clientIP        sql.NullString
 		latency         sql.NullInt64
 		status          sql.NullInt64
 		stream          int
@@ -66,7 +71,7 @@ func scanUsageLog(row interface{ Scan(...any) error }) (*UsageLogRow, error) {
 		upstreamHeaders sql.NullString
 	)
 	if err := row.Scan(
-		&entry.ID, &entry.RequestID, &apiKeyID, &entry.Kind, &model, &provider, &configID, &targetURL,
+		&entry.ID, &entry.RequestID, &apiKeyID, &entry.Kind, &model, &provider, &configID, &targetURL, &clientIP,
 		&entry.InputTokens, &entry.OutputTokens, &entry.TotalTokens, &latency, &status, &stream, &errorDetail,
 		&requestHeaders, &upstreamHeaders, &entry.CreatedAt,
 	); err != nil {
@@ -89,6 +94,9 @@ func scanUsageLog(row interface{ Scan(...any) error }) (*UsageLogRow, error) {
 	}
 	if targetURL.Valid {
 		entry.TargetURL = &targetURL.String
+	}
+	if clientIP.Valid {
+		entry.ClientIP = &clientIP.String
 	}
 	if latency.Valid {
 		entry.LatencyMs = &latency.Int64
@@ -117,8 +125,8 @@ func GetUsageLog(id int64) (*UsageLogRow, error) {
 
 // ListUsageLogs returns usage rows newest-first, honoring the given filters.
 func ListUsageLogs(filters UsageFilters) ([]UsageLogRow, error) {
-	conditions := make([]string, 0, 6)
-	params := make([]any, 0, 9)
+	conditions := make([]string, 0, 7)
+	params := make([]any, 0, 10)
 	if filters.Model != "" {
 		conditions = append(conditions, "model = ?")
 		params = append(params, filters.Model)
@@ -133,6 +141,10 @@ func ListUsageLogs(filters UsageFilters) ([]UsageLogRow, error) {
 	if filters.Kind != "" {
 		conditions = append(conditions, "kind = ?")
 		params = append(params, filters.Kind)
+	}
+	if filters.ClientIP != "" {
+		conditions = append(conditions, "client_ip LIKE ?")
+		params = append(params, "%"+filters.ClientIP+"%")
 	}
 	if filters.Status != nil {
 		conditions = append(conditions, "status = ?")

@@ -80,9 +80,10 @@ CREATE TABLE IF NOT EXISTS api_configs (
   response_template TEXT,
   api_key TEXT,
   timeout_ms INTEGER DEFAULT 15000,
-  /* Limits for the /free streaming tunnel only. 0 means unlimited.
-     Keep the defaults in sync with DefaultStreamTimeoutMs /
-     DefaultStreamMaxBodyMb in resources.go. */
+  /* Limits for the /free streaming tunnel only. stream_timeout_ms is an
+     inactivity limit (header wait, then gap between body chunks), not a total
+     duration. 0 means unlimited. Keep the defaults in sync with
+     DefaultStreamTimeoutMs / DefaultStreamMaxBodyMb in resources.go. */
   stream_timeout_ms INTEGER NOT NULL DEFAULT 300000,
   stream_max_body_mb INTEGER NOT NULL DEFAULT 8,
   /* Mount point: 'open' (API key required) or 'free' (public). */
@@ -102,6 +103,8 @@ CREATE TABLE IF NOT EXISTS usage_logs (
   api_config_id INTEGER,
   /* Upstream URL an API-config request was forwarded to, without query. */
   target_url TEXT,
+  /* Caller address, resolving CF-Connecting-IP / X-Forwarded-For first. */
+  client_ip TEXT,
   input_tokens INTEGER DEFAULT 0,
   output_tokens INTEGER DEFAULT 0,
   total_tokens INTEGER DEFAULT 0,
@@ -152,6 +155,19 @@ CREATE TABLE IF NOT EXISTS admin_sessions (
   FOREIGN KEY(admin_user_id) REFERENCES admin_users(id)
 );
 
+/* Gateway IP access rules. Both lists are JSON arrays of single addresses or
+   CIDR prefixes. Empty means "no rule"; loopback callers are never filtered
+   (enforced by the middleware, not this table). */
+CREATE TABLE IF NOT EXISTS ip_access_settings (
+  id INTEGER PRIMARY KEY CHECK (id = 1),
+  whitelist TEXT NOT NULL DEFAULT '[]',
+  blacklist TEXT NOT NULL DEFAULT '[]',
+  updated_at INTEGER NOT NULL DEFAULT 0
+);
+
+INSERT OR IGNORE INTO ip_access_settings (id, whitelist, blacklist, updated_at)
+VALUES (1, '[]', '[]', 0);
+
 CREATE INDEX IF NOT EXISTS idx_usage_created ON usage_logs(created_at);
 CREATE INDEX IF NOT EXISTS idx_usage_model ON usage_logs(model);
 CREATE INDEX IF NOT EXISTS idx_usage_config ON usage_logs(api_config_id);
@@ -196,6 +212,10 @@ func Migrate(db *sql.DB) error {
 		}
 		// Added with the forwarding usage column.
 		if err := ensureColumn(tx, "usage_logs", "target_url", "TEXT"); err != nil {
+			return err
+		}
+		// Added so usage rows can show where each caller came from.
+		if err := ensureColumn(tx, "usage_logs", "client_ip", "TEXT"); err != nil {
 			return err
 		}
 		// Added with request-header snapshots in the usage details view.

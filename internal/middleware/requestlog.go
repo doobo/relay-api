@@ -71,8 +71,26 @@ func RequestLog(next http.Handler, skipPrefixes ...string) http.Handler {
 			"path", r.URL.Path,
 			"status", rec.status,
 			"latency_ms", time.Since(start).Milliseconds(),
+			"client_ip", util.ClientIP(r),
+			"protocol", requestProtocol(r),
 		)
 	})
+}
+
+// requestProtocol names the wire protocol for the access log. This server
+// speaks h2c directly; behind a TLS terminator an h2 request arrives with no
+// r.TLS, so h2 vs h2c is decided by whether the connection itself is TLS.
+func requestProtocol(r *http.Request) string {
+	if r.ProtoMajor == 2 {
+		if r.TLS != nil {
+			return "h2"
+		}
+		return "h2c"
+	}
+	if r.ProtoMajor == 1 {
+		return "http/1.1"
+	}
+	return r.Proto
 }
 
 // statusRecorder captures the response status for the access log while leaving

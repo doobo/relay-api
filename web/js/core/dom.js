@@ -26,6 +26,10 @@ export function fillTable(tableId, rows) {
   const table = el(tableId);
   const tbody = table.querySelector("tbody");
   const headers = [...table.querySelectorAll("thead th")].map((th) => th.textContent.trim());
+  // Tables that opt into truncation wrap plain text in a span so the CSS can
+  // cap its width and ellipsize it; the title attribute exposes the full value
+  // as a native tooltip on hover.
+  const truncate = table.dataset.truncate === "true";
   tbody.innerHTML = "";
 
   if (rows.length === 0) {
@@ -37,8 +41,17 @@ export function fillTable(tableId, rows) {
     const tr = document.createElement("tr");
     row.forEach((cell, index) => {
       const td = document.createElement("td");
-      if (cell instanceof HTMLElement) td.appendChild(cell);
-      else td.textContent = cell ?? "";
+      if (cell instanceof HTMLElement) {
+        td.appendChild(cell);
+      } else if (truncate) {
+        const text = document.createElement("span");
+        text.className = "cell-clamp";
+        text.textContent = cell ?? "";
+        if (text.textContent) text.title = text.textContent;
+        td.appendChild(text);
+      } else {
+        td.textContent = cell ?? "";
+      }
       const label = headers[index] ?? "";
       if (label) td.dataset.label = label;
       else if (index > 0) td.classList.add("cell-actions");
@@ -84,6 +97,7 @@ export function monoCell(value) {
   const span = document.createElement("span");
   span.className = "cell-mono";
   span.textContent = value;
+  span.title = value ?? "";
   return span;
 }
 

@@ -264,6 +264,91 @@ func TestTunnelClientDisconnect(t *testing.T) {
 	}
 }
 
+// firstWriteRecorder signals the first body write so a test can cancel the
+// client only after the relay has already streamed something back.
+type firstWriteRecorder struct {
+	*httptest.ResponseRecorder
+	wrote chan struct{}
+	once  sync.Once
+}
+
+func (r *firstWriteRecorder) Write(p []byte) (int, error) {
+	n, err := r.ResponseRecorder.Write(p)
+	if n > 0 {
+		r.once.Do(func() { close(r.wrote) })
+	}
+	return n, err
+}
+
+// TestTunnelClientDisconnectMidStreamKeepsStatus verifies that a client which
+// closes after receiving body bytes is not logged as a 504: the upstream read
+// fails with context.Canceled, but that is a client-initiated end to the
+// stream, not an upstream gateway timeout. The row keeps the upstream status
+// (so a successful long stream stays a 200) and explains the early close.
+func TestTunnelClientDisconnectMidStreamKeepsStatus(t *testing.T) {
+	harness := newTunnelHarness(t)
+
+	mock := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		flusher, ok := w.(http.Flusher)
+		if !ok {
+			t.Fatal("upstream has no flusher")
+		}
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte("partial"))
+		flusher.Flush()
+		// Stay open like a long-lived stream; the client will end it.
+		<-r.Context().Done()
+	}))
+	defer mock.Close()
+
+	mustConfig(t, db.NewAPIConfig{
+		Name: "midstream", Method: "GET", URL: mock.URL,
+		StreamTimeoutMs: 0, Route: "free", Enabled: true,
+	})
+
+	ctx, cancel := context.WithCancel(context.Background())
+	request := httptest.NewRequest(http.MethodGet, "/free/midstream", nil).WithContext(ctx)
+	recorder := &firstWriteRecorder{
+		ResponseRecorder: httptest.NewRecorder(),
+		wrote:            make(chan struct{}),
+	}
+
+	done := make(chan struct{})
+	go func() {
+		harness.handler.ServeHTTP(recorder, request)
+		close(done)
+	}()
+
+	select {
+	case <-recorder.wrote:
+	case <-time.After(3 * time.Second):
+		t.Fatal("relay never streamed a body chunk to the client")
+	}
+	cancel()
+
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("handler did not return after the client disconnected")
+	}
+	if err := db.FlushUsage(context.Background()); err != nil {
+		t.Fatalf("flush usage: %v", err)
+	}
+
+	var status *int
+	var message *string
+	row := db.Get().QueryRow(`SELECT status, error FROM usage_logs ORDER BY id DESC LIMIT 1`)
+	if err := row.Scan(&status, &message); err != nil {
+		t.Fatalf("scan usage: %v", err)
+	}
+	if status == nil || *status != http.StatusOK {
+		t.Fatalf("recorded status = %v, want 200", status)
+	}
+	if message == nil || !strings.Contains(*message, "client disconnected after") {
+		t.Fatalf("recorded error = %v, want a client-disconnect note", message)
+	}
+}
+
 // TestTunnelStreamTimeout verifies that a stream which stops producing data is
 // cut by streamTimeoutMs and recorded as 504 instead of lingering forever (and
 // being logged as a clean 200).
@@ -356,5 +441,118 @@ func TestTunnelUsage(t *testing.T) {
 	}
 	if status == nil || *status != http.StatusOK {
 		t.Fatalf("status = %v", status)
+	}
+}
+
+// TestTunnelActiveStreamOutlivesTimeout verifies StreamTimeoutMs is an
+// inactivity limit: a stream that keeps producing data is not cut just because
+// it has run longer than the configured timeout.
+func TestTunnelActiveStreamOutlivesTimeout(t *testing.T) {
+	harness := newTunnelHarness(t)
+
+	mock := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		flusher, ok := w.(http.Flusher)
+		if !ok {
+			t.Fatal("upstream has no flusher")
+		}
+		w.WriteHeader(http.StatusOK)
+		for i := 0; i < 8; i++ {
+			_, _ = w.Write([]byte("chunk\n"))
+			flusher.Flush()
+			time.Sleep(30 * time.Millisecond)
+		}
+	}))
+	defer mock.Close()
+
+	mustConfig(t, db.NewAPIConfig{
+		Name: "active", Method: "GET", URL: mock.URL,
+		StreamTimeoutMs: 80, Route: "free", Enabled: true,
+	})
+
+	started := time.Now()
+	recorder := httptest.NewRecorder()
+	harness.handler.ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "/free/active", nil))
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", recorder.Code, recorder.Body.String())
+	}
+	if elapsed := time.Since(started); elapsed < 200*time.Millisecond {
+		t.Fatalf("stream finished in %v; the upstream did not stream long enough", elapsed)
+	}
+	if got := strings.Count(recorder.Body.String(), "chunk"); got != 8 {
+		t.Fatalf("received %d chunks, want 8", got)
+	}
+}
+
+// TestTunnelClientIP verifies the usage row records the caller address,
+// preferring Cloudflare's CF-Connecting-IP over the socket address.
+func TestTunnelClientIP(t *testing.T) {
+	harness := newTunnelHarness(t)
+
+	mock := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer mock.Close()
+
+	mustConfig(t, db.NewAPIConfig{
+		Name: "ip", Method: "POST", URL: mock.URL,
+		StreamTimeoutMs: 15000, Route: "free", Enabled: true,
+	})
+
+	request := httptest.NewRequest(http.MethodPost, "/free/ip", strings.NewReader("{}"))
+	request.RemoteAddr = "10.0.0.1:1234"
+	request.Header.Set("CF-Connecting-IP", "203.0.113.9")
+	recorder := httptest.NewRecorder()
+	harness.handler.ServeHTTP(recorder, request)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("status = %d", recorder.Code)
+	}
+	if err := db.FlushUsage(context.Background()); err != nil {
+		t.Fatalf("flush usage: %v", err)
+	}
+
+	var clientIP *string
+	if err := db.Get().QueryRow(`SELECT client_ip FROM usage_logs ORDER BY id DESC LIMIT 1`).Scan(&clientIP); err != nil {
+		t.Fatalf("scan usage: %v", err)
+	}
+	if clientIP == nil || *clientIP != "203.0.113.9" {
+		t.Fatalf("client_ip = %v, want 203.0.113.9", clientIP)
+	}
+}
+
+// TestTunnelForwardsTrailers verifies an upstream's HTTP trailers survive the
+// relay (gRPC relies on them for grpc-status).
+func TestTunnelForwardsTrailers(t *testing.T) {
+	harness := newTunnelHarness(t)
+
+	mock := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Trailer", "X-Trailer")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte("body"))
+		w.Header().Set("X-Trailer", "done")
+	}))
+	defer mock.Close()
+
+	mustConfig(t, db.NewAPIConfig{
+		Name: "trailers", Method: "GET", URL: mock.URL,
+		StreamTimeoutMs: 15000, Route: "free", Enabled: true,
+	})
+
+	proxy := httptest.NewServer(harness.handler)
+	defer proxy.Close()
+
+	response, err := http.Get(proxy.URL + "/free/trailers")
+	if err != nil {
+		t.Fatalf("get: %v", err)
+	}
+	body, err := io.ReadAll(response.Body)
+	_ = response.Body.Close()
+	if err != nil {
+		t.Fatalf("read body: %v", err)
+	}
+	if string(body) != "body" {
+		t.Fatalf("body = %q", body)
+	}
+	if got := response.Trailer.Get("X-Trailer"); got != "done" {
+		t.Fatalf("trailer = %q, want done", got)
 	}
 }

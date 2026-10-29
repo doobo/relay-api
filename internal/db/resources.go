@@ -648,10 +648,11 @@ func DeleteAPIKey(id int64) (bool, error) {
 // Defaults for a /free tunnel's limits. 0 keeps its "unlimited" meaning when it
 // is sent explicitly; these only apply when a value is left out.
 const (
-	// DefaultStreamTimeoutMs bounds one tunnel request end to end (5 minutes).
-	// Without it a client or upstream that vanishes without a FIN pins the
-	// handler goroutine plus its copy buffer forever, and /free has no idle
-	// timeout of its own.
+	// DefaultStreamTimeoutMs is the tunnel's inactivity limit (5 minutes):
+	// the wait for response headers, and then the gap between body chunks.
+	// It is not a total-duration cap, so an active long-lived stream is never
+	// cut just for being old, while one whose peer vanished without a FIN is
+	// still reaped instead of pinning its goroutine and buffer forever.
 	DefaultStreamTimeoutMs = 300_000
 	// DefaultStreamMaxBodyMb caps a tunnel upload. The tunnel streams bodies
 	// through untouched, so an unbounded one would also raise the h2c

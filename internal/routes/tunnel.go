@@ -78,6 +78,7 @@ func (h *TunnelRoutes) handle(w http.ResponseWriter, r *http.Request) {
 	requestID := middleware.RequestID(r.Context())
 	startedAt := time.Now()
 
+	clientIP := util.ClientIP(r)
 	configPath := strings.Trim(r.PathValue("path"), "/")
 	apiConfig, rest, err := db.ResolveAPIConfig(configPath, "free")
 	if err != nil {
@@ -101,6 +102,7 @@ func (h *TunnelRoutes) handle(w http.ResponseWriter, r *http.Request) {
 		}
 		configID := apiConfig.ID
 		latency := time.Since(startedAt).Milliseconds()
+		ip := clientIP
 		db.RecordUsageAsync(db.UsageRecord{
 			RequestID:   requestID,
 			APIKeyID:    nil,
@@ -109,7 +111,9 @@ func (h *TunnelRoutes) handle(w http.ResponseWriter, r *http.Request) {
 			TargetURL:   targetURL,
 			LatencyMs:   &latency,
 			Status:      &status,
+			Stream:      true,
 			Error:       errMsg,
+			ClientIP:    &ip,
 		})
 	}
 
@@ -213,15 +217,19 @@ func (h *TunnelRoutes) handle(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// A zero stream timeout means "no timeout": a tunnel may legitimately idle
-	// for a long time. A non-zero timeout is enforced via the request context,
-	// and a client disconnect cancels that context too (r.Context()), so a dead
-	// tunnel does not keep an upstream request alive.
+	// for a long time. A non-zero timeout is an inactivity limit, not a total
+	// duration: HeaderTimeoutMs bounds the wait for response headers and
+	// IdleTimeoutMs restarts on every body byte, so an active multi-hour stream
+	// is never cut just for being old. A client disconnect cancels the request
+	// context too (r.Context()), so a dead tunnel does not keep an upstream
+	// request alive.
 	response, err := util.FetchUpstream(r.Context(), "", util.FetchOptions{
-		Method:    clientMethod,
-		Headers:   upstreamHeaders,
-		Body:      body,
-		TimeoutMs: apiConfig.StreamTimeoutMs,
-		URL:       parsedURL,
+		Method:          clientMethod,
+		Headers:         upstreamHeaders,
+		Body:            body,
+		HeaderTimeoutMs: apiConfig.StreamTimeoutMs,
+		IdleTimeoutMs:   apiConfig.StreamTimeoutMs,
+		URL:             parsedURL,
 	})
 	if err != nil {
 		if r.Context().Err() != nil {
@@ -256,28 +264,94 @@ func (h *TunnelRoutes) handle(w http.ResponseWriter, r *http.Request) {
 	for key, value := range util.FilterResponseHeaders(response.Header) {
 		w.Header().Set(key, value)
 	}
+	// HTTP/2 trailers carry gRPC's grpc-status and similar end-of-stream
+	// metadata. They only survive the relay when the keys are declared before
+	// WriteHeader; forwardTrailers below fills in the values after the copy.
+	declaredTrailers := declareTrailers(w, response.Trailer)
 	w.Header().Set("X-Request-ID", requestID)
 	w.WriteHeader(response.StatusCode)
 	// Recorded after the response is copied: the usage write no longer sits
 	// between the client and its first byte (and, being async, does not block
-	// the handler on the single SQLite connection either). A stream cut short
-	// by the configured timeout or by the client leaving is recorded as such
-	// instead of as a clean 200.
-	copyErr := copyAndFlush(w, response.Body)
+	// the handler on the single SQLite connection either). A stream reaped by
+	// the configured idle timeout is recorded as 504; a client that leaves
+	// after receiving data keeps the upstream status and gets a note instead.
+	written, copyErr := copyAndFlush(w, response.Body)
+	forwardTrailers(w, response.Trailer, declaredTrailers)
 	switch {
 	case copyErr == nil:
 		record(response.StatusCode, nil)
-	case errors.Is(copyErr, errClientDisconnected):
-		message := "client disconnected"
-		record(499, &message)
-	default:
+	case r.Context().Err() != nil, errors.Is(copyErr, errClientDisconnected):
+		// The client closed the stream (or its write failed) while the response
+		// was being relayed. Cancelling the request also cancels the upstream
+		// body read, so this must be classified before the read-error branch:
+		// otherwise a client-initiated close would be logged as a 504 upstream
+		// timeout, which is the false-504 this tunnel is meant to avoid.
+		//
+		// Data was already flowing, so keep the upstream's status (a successful
+		// long stream stays a 200) and only annotate the row with the early
+		// close. A disconnect before any body byte is still worth flagging as
+		// 499, mirroring the pre-header disconnect path above.
+		message := fmt.Sprintf("client disconnected after %d bytes", written)
+		if written > 0 {
+			record(response.StatusCode, &message)
+		} else {
+			record(499, &message)
+		}
+	case errors.Is(copyErr, util.ErrUpstreamTimeout), errors.Is(copyErr, context.DeadlineExceeded):
+		// A timeout that fires mid-stream arrives here as a body read error;
+		// name it explicitly so the usage row is diagnosable.
 		message := copyErr.Error()
-		if errors.Is(copyErr, context.DeadlineExceeded) {
-			// A timeout that fires mid-stream arrives here as a body read
-			// error; name it explicitly so the usage row is diagnosable.
+		if !strings.Contains(message, "timeout") {
 			message = fmt.Sprintf("%v after %dms", util.ErrUpstreamTimeout, apiConfig.StreamTimeoutMs)
 		}
 		record(http.StatusGatewayTimeout, &message)
+	default:
+		// A read/reset failure that is not a timeout is an upstream failure,
+		// not a gateway timeout: 502 identifies the side that broke.
+		message := copyErr.Error()
+		record(http.StatusBadGateway, &message)
+	}
+}
+
+// declareTrailers announces the upstream's trailer keys before the response
+// headers are committed. It returns the lowercased key set so forwardTrailers
+// knows which names were predeclared and which need the TrailerPrefix form.
+func declareTrailers(w http.ResponseWriter, trailers http.Header) map[string]bool {
+	if len(trailers) == 0 {
+		return nil
+	}
+	declared := make(map[string]bool, len(trailers))
+	for key := range trailers {
+		w.Header().Add("Trailer", key)
+		declared[strings.ToLower(key)] = true
+	}
+	return declared
+}
+
+// forwardTrailers writes the trailer values collected while copying the body.
+// Keys that could not be predeclared (an upstream that only reveals trailers at
+// EOF) use http.TrailerPrefix, which net/http recognises for both HTTP/1.1
+// chunked trailers and HTTP/2 trailing HEADERS.
+func forwardTrailers(w http.ResponseWriter, trailers http.Header, declared map[string]bool) {
+	if len(trailers) == 0 {
+		return
+	}
+	wrote := false
+	for key, values := range trailers {
+		if len(values) == 0 {
+			continue
+		}
+		name := key
+		if !declared[strings.ToLower(key)] {
+			name = http.TrailerPrefix + key
+		}
+		w.Header()[name] = values
+		wrote = true
+	}
+	if wrote {
+		if flusher, ok := w.(http.Flusher); ok {
+			flusher.Flush()
+		}
 	}
 }
 
@@ -345,28 +419,35 @@ var errClientDisconnected = errors.New("client disconnected")
 // once the last flush is getting stale. Without a flusher it degrades to
 // io.Copy.
 //
-// It returns nil on a clean end of stream, errClientDisconnected when the
-// client went away, and the read error otherwise (an upstream reset, or the
-// configured stream timeout expiring mid-response).
-func copyAndFlush(w http.ResponseWriter, src io.Reader) error {
+// It returns the number of bytes relayed to the client along with the outcome:
+// nil on a clean end of stream, errClientDisconnected when the client went away,
+// and the read error otherwise (an upstream reset, or the configured stream
+// timeout expiring mid-response). The byte count lets the caller tell a client
+// that left after receiving data from one that vanished before the body began.
+func copyAndFlush(w http.ResponseWriter, src io.Reader) (int64, error) {
 	flusher, _ := w.(http.Flusher)
 	if flusher == nil {
-		if _, err := io.Copy(w, src); err != nil {
-			return err
+		written, err := io.Copy(w, src)
+		if err != nil {
+			return written, err
 		}
-		return nil
+		return written, nil
 	}
 	bufferPtr := tunnelBufferPool.Get().(*[]byte)
 	defer tunnelBufferPool.Put(bufferPtr)
 	buffer := *bufferPtr
-	var pending int
+	var (
+		pending int
+		written int64
+	)
 	lastFlush := time.Now()
 	for {
 		n, err := src.Read(buffer)
 		if n > 0 {
 			if _, writeErr := w.Write(buffer[:n]); writeErr != nil {
-				return fmt.Errorf("%w: %v", errClientDisconnected, writeErr)
+				return written, fmt.Errorf("%w: %v", errClientDisconnected, writeErr)
 			}
+			written += int64(n)
 			pending += n
 		}
 		if pending > 0 && (pending >= tunnelFlushBytes ||
@@ -378,9 +459,9 @@ func copyAndFlush(w http.ResponseWriter, src io.Reader) error {
 		}
 		if err != nil {
 			if errors.Is(err, io.EOF) {
-				return nil
+				return written, nil
 			}
-			return err
+			return written, err
 		}
 	}
 }

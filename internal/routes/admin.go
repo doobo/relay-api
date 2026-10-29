@@ -1306,6 +1306,7 @@ type usageLogDTO struct {
 	Provider     *string `json:"provider"`
 	APIConfigID  *int64  `json:"api_config_id"`
 	TargetURL    *string `json:"target_url"`
+	ClientIP     *string `json:"client_ip"`
 	InputTokens  int     `json:"input_tokens"`
 	OutputTokens int     `json:"output_tokens"`
 	TotalTokens  int     `json:"total_tokens"`
@@ -1330,6 +1331,7 @@ func toUsageLogDTO(entry db.UsageLogRow) usageLogDTO {
 		Provider:     entry.Provider,
 		APIConfigID:  entry.APIConfigID,
 		TargetURL:    entry.TargetURL,
+		ClientIP:     entry.ClientIP,
 		InputTokens:  entry.InputTokens,
 		OutputTokens: entry.OutputTokens,
 		TotalTokens:  entry.TotalTokens,
@@ -1355,6 +1357,7 @@ func (h *AdminResources) usage(w http.ResponseWriter, r *http.Request) {
 		Model:    query.Get("model"),
 		Provider: query.Get("provider"),
 		Kind:     query.Get("kind"),
+		ClientIP: query.Get("client_ip"),
 	}
 	if raw := query.Get("status"); raw != "" {
 		if value, err := strconv.Atoi(raw); err == nil {

@@ -216,6 +216,72 @@ dialog select:focus {
   justify-self: start;
 }
 
+/* IP allow/deny lists: two textareas side by side, one rule per line. */
+.ip-access-form {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(240px, 1fr));
+  gap: 10px;
+  margin-bottom: 14px;
+}
+
+.ip-access-form label {
+  display: grid;
+  gap: 6px;
+  font-size: 13px;
+  color: var(--muted);
+}
+
+.ip-access-form textarea {
+  min-height: 132px;
+  padding: 8px 10px;
+  background: var(--input-bg);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  color: var(--text);
+  font-family: var(--mono);
+  font-size: 12px;
+  line-height: 1.5;
+  resize: vertical;
+}
+
+.ip-access-form textarea::placeholder {
+  color: var(--placeholder);
+}
+
+.ip-access-form textarea:hover {
+  border-color: var(--border-strong);
+}
+
+.ip-access-form textarea:focus {
+  border-color: var(--accent);
+  outline: none;
+  box-shadow: 0 0 0 3px var(--accent-soft);
+}
+
+.ip-access-form button,
+.ip-access-form .hint,
+.ip-access-form .notice {
+  grid-column: 1 / -1;
+}
+
+.ip-access-form button {
+  justify-self: start;
+}
+
+.ip-access-form .hint {
+  margin: 0;
+}
+
+.ip-access-form .hint.error {
+  color: var(--danger);
+}
+
+@media (max-width: 760px) {
+  .ip-access-form {
+    grid-template-columns: 1fr;
+  }
+}
+
 .check-row {
   display: flex;
   align-items: center;
@@ -407,6 +473,70 @@ dialog legend {
   font-family: var(--mono);
   font-size: 12.5px;
   word-break: break-all;
+}
+
+/* Usage table: cap each column, ellipsize overlong values and keep the full
+   text in the cell's title tooltip. The capped widths also give .table-wrap a
+   natural min-width, so a narrow panel scrolls horizontally instead of
+   squashing every column. */
+.usage-table td,
+.usage-table th {
+  overflow: hidden;
+}
+
+.usage-table .cell-clamp,
+.usage-table .cell-mono {
+  display: inline-block;
+  max-width: 220px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  vertical-align: bottom;
+}
+
+.usage-table .cell-mono {
+  word-break: normal;
+}
+
+.usage-table td:nth-child(1) :is(.cell-clamp, .cell-mono) { max-width: 150px; }
+.usage-table td:nth-child(2) :is(.cell-clamp, .cell-mono) { max-width: 190px; }
+.usage-table td:nth-child(3) :is(.cell-clamp, .cell-mono) { max-width: 70px; }
+.usage-table td:nth-child(4) :is(.cell-clamp, .cell-mono) { max-width: 150px; }
+.usage-table td:nth-child(5) :is(.cell-clamp, .cell-mono) { max-width: 170px; }
+.usage-table td:nth-child(6) :is(.cell-clamp, .cell-mono) { max-width: 260px; }
+.usage-table td:nth-child(7) :is(.cell-clamp, .cell-mono) { max-width: 140px; }
+.usage-table td:nth-child(8) :is(.cell-clamp, .cell-mono) { max-width: 80px; }
+.usage-table td:nth-child(9) :is(.cell-clamp, .cell-mono) { max-width: 80px; }
+.usage-table td:nth-child(10) :is(.cell-clamp, .cell-mono) { max-width: 90px; }
+
+/* The Details column stays pinned to the right while the capped columns
+   scroll underneath it. It needs an opaque surface so scrolled text cannot
+   show through the pinned cell. */
+.usage-table th:last-child,
+.usage-table td:last-child {
+  position: sticky;
+  right: 0;
+  background-color: var(--panel);
+  box-shadow: -10px 0 14px -14px var(--shadow-lg);
+}
+
+.usage-table th:last-child {
+  z-index: 2;
+}
+
+.usage-table td:last-child {
+  z-index: 1;
+}
+
+.usage-table tbody tr:hover td:last-child {
+  background-image: linear-gradient(var(--row-hover), var(--row-hover));
+}
+
+/* `table` clips to its border radius; that would make the sticky Details cell
+   stick to the table instead of the .table-wrap scrollport. The usage table has
+   its own frame from the panel, so it can keep overflow visible. */
+.panel .usage-table {
+  overflow: visible;
 }
 
 /* --------------------------------------------------------------- tables */

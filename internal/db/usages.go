@@ -11,13 +11,15 @@ import (
 
 // UsageRecord is one usage_logs row to insert. Nil pointers become NULL.
 type UsageRecord struct {
-	RequestID    string
-	APIKeyID     *int64
-	Kind         string // "ai" or "api"
-	Model        *string
-	Provider     *string
-	APIConfigID  *int64
-	TargetURL    *string
+	RequestID   string
+	APIKeyID    *int64
+	Kind        string // "ai" or "api"
+	Model       *string
+	Provider    *string
+	APIConfigID *int64
+	TargetURL   *string
+	// ClientIP is the resolved caller address (proxy headers included).
+	ClientIP     *string
 	InputTokens  int
 	OutputTokens int
 	TotalTokens  int
@@ -39,10 +41,10 @@ type UsageRecord struct {
 // usageInsertSQL appends one usage_logs row. The synchronous and asynchronous
 // paths share it so both write an identical shape.
 const usageInsertSQL = `INSERT INTO usage_logs
-	(request_id, api_key_id, kind, model, provider, api_config_id, target_url,
+	(request_id, api_key_id, kind, model, provider, api_config_id, target_url, client_ip,
 	 input_tokens, output_tokens, total_tokens, latency_ms, status, stream, error,
 	 request_headers, upstream_headers, created_at)
- VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+ VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
 
 // usageInsertArgs renders a record into the placeholder arguments, stamping it
 // with the batch's createdAt so the log row and its daily rollup agree.
@@ -55,6 +57,7 @@ func usageInsertArgs(record UsageRecord, createdAt int64) []any {
 	return []any{
 		record.RequestID, nullInt(record.APIKeyID), record.Kind,
 		nullString(record.Model), nullString(record.Provider), nullInt(record.APIConfigID), nullString(record.TargetURL),
+		nullString(record.ClientIP),
 		record.InputTokens, record.OutputTokens, total,
 		nullInt(record.LatencyMs), nullStatus(record.Status), boolToInt(record.Stream), nullString(record.Error),
 		nullString(requestHeaders), nullString(upstreamHeaders),

@@ -23,6 +23,7 @@ import (
 	"relay-api/internal/config"
 	"relay-api/internal/db"
 	"relay-api/internal/httperr"
+	"relay-api/internal/ipacl"
 	"relay-api/internal/logging"
 	"relay-api/internal/middleware"
 	"relay-api/internal/router"
@@ -79,6 +80,20 @@ func main() {
 		fatal("seed default admin", "error", err)
 	}
 
+	// Load the IP allow/deny lists once; the Settings handler swaps the
+	// compiled rules in place after a save, so no restart is needed. Failing
+	// here is deliberate: silently running with a malformed whitelist would
+	// either block everyone or enforce nothing.
+	ipSettings, err := db.GetIPAccessSettings()
+	if err != nil {
+		fatal("load IP access settings", "error", err)
+	}
+	ipRules, err := ipacl.Compile(ipSettings.Whitelist, ipSettings.Blacklist)
+	if err != nil {
+		fatal("compile IP access settings", "error", err)
+	}
+	ipAccess := ipacl.NewStore(ipRules)
+
 	secrets, err := util.NewSecretBox()
 	if err != nil {
 		fatal("load secret encryption key", "error", err)
@@ -92,6 +107,7 @@ func main() {
 	// admin-only via RequireAdminRole.
 	resourcesMux := http.NewServeMux()
 	routes.NewAdminResources(secrets, cfg.LogRetentionDays).Register(resourcesMux)
+	routes.NewSettingsRoutes(ipAccess).Register(resourcesMux)
 	resourcesMux.HandleFunc("/", func(w http.ResponseWriter, _ *http.Request) { httperr.NotFound(w) })
 
 	adminMux := http.NewServeMux()
@@ -152,7 +168,7 @@ func main() {
 	}
 	srv := &http.Server{
 		Addr:              ":" + strconv.Itoa(cfg.Port),
-		Handler:           h2c.NewHandler(middleware.RequestLog(mux, cfg.AccessLogSkipPrefixes...), h2s),
+		Handler:           h2c.NewHandler(middleware.RequestLog(middleware.IPAccess(ipAccess)(mux), cfg.AccessLogSkipPrefixes...), h2s),
 		ReadHeaderTimeout: 10 * time.Second,
 		// Deliberately no WriteTimeout/ReadTimeout: SSE chat streams and the
 		// /free tunnel are long-lived. Idle control lives in the handlers

@@ -2,7 +2,6 @@ package middleware
 
 import (
 	"context"
-	"net"
 	"net/http"
 	"strings"
 
@@ -68,7 +67,7 @@ func resolveAISession(r *http.Request) string {
 		}
 	}
 
-	seed := clientIP(r) + "|" + r.UserAgent()
+	seed := util.ClientIP(r) + "|" + r.UserAgent()
 	sum := util.SHA256Hex(seed)
 	return sum[:32]
 }
@@ -86,21 +85,4 @@ func sanitizeSession(value string) string {
 		return cleaned[:200]
 	}
 	return cleaned
-}
-
-// clientIP prefers the usual proxy headers, then falls back to RemoteAddr.
-func clientIP(r *http.Request) string {
-	if forwarded := r.Header.Get("X-Forwarded-For"); forwarded != "" {
-		if first := strings.TrimSpace(strings.Split(forwarded, ",")[0]); first != "" {
-			return first
-		}
-	}
-	if realIP := strings.TrimSpace(r.Header.Get("X-Real-IP")); realIP != "" {
-		return realIP
-	}
-	host, _, err := net.SplitHostPort(strings.TrimSpace(r.RemoteAddr))
-	if err == nil {
-		return host
-	}
-	return strings.TrimSpace(r.RemoteAddr)
 }

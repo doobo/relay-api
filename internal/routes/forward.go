@@ -38,6 +38,7 @@ func (h *ForwardRoutes) Register(mux *http.ServeMux, prefix string) {
 func (h *ForwardRoutes) handle(w http.ResponseWriter, r *http.Request) {
 	auth := middleware.APIAuthFrom(r.Context())
 	requestID := middleware.RequestID(r.Context())
+	clientIP := util.ClientIP(r)
 	startedAt := time.Now()
 
 	configPath := strings.Trim(r.PathValue("path"), "/")
@@ -81,6 +82,7 @@ func (h *ForwardRoutes) handle(w http.ResponseWriter, r *http.Request) {
 		}
 		configID := apiConfig.ID
 		latency := time.Since(startedAt).Milliseconds()
+		ip := clientIP
 		db.RecordUsageAsync(db.UsageRecord{
 			RequestID:       requestID,
 			APIKeyID:        keyPtr,
@@ -90,6 +92,7 @@ func (h *ForwardRoutes) handle(w http.ResponseWriter, r *http.Request) {
 			LatencyMs:       &latency,
 			Status:          &status,
 			Error:           errMsg,
+			ClientIP:        &ip,
 			HeaderSnapshots: headerSnapshots,
 		})
 	}
@@ -258,8 +261,10 @@ func (h *ForwardRoutes) handle(w http.ResponseWriter, r *http.Request) {
 
 	// Pure passthrough.
 	writeUpstreamHeaders(w, response.Header, requestID)
+	declaredTrailers := declareTrailers(w, response.Trailer)
 	w.WriteHeader(response.StatusCode)
 	_, _ = io.Copy(w, response.Body)
+	forwardTrailers(w, response.Trailer, declaredTrailers)
 	record(response.StatusCode, nil)
 }
 

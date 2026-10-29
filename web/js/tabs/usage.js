@@ -19,6 +19,7 @@ const PAGE_SIZE = 50;
 const FILTERS = {
   model: "usageFilterModel",
   provider: "usageFilterProvider",
+  client_ip: "usageFilterClientIP",
   kind: "usageFilterKind",
   status: "usageFilterStatus",
 };
@@ -61,6 +62,7 @@ function render() {
       // Forwards have no provider: show where the request actually went. Older
       // rows predate the column and still fall back to a dash.
       u.provider || (u.target_url ? monoCell(u.target_url) : "-"),
+      u.client_ip ? monoCell(u.client_ip) : "-",
       u.total_tokens,
       statusPill(u.status),
       `${u.latency_ms ?? "-"}ms`,
@@ -91,6 +93,7 @@ async function showUsageDetail(id) {
       `API key: ${keyLabel(usage.api_key_id)}`,
       `Model/Config: ${model}`,
       `Provider: ${usage.provider || usage.target_url || "-"}`,
+      `Client IP: ${usage.client_ip || "-"}`,
       `Status: ${usage.status ?? "-"}`,
       `Latency: ${usage.latency_ms ?? "-"}ms`,
       `Tokens: ${usage.total_tokens} (in ${usage.input_tokens} / out ${usage.output_tokens})`,

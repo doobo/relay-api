@@ -295,6 +295,7 @@
           </select>
           <input id="usageFilterModel" placeholder="model" aria-label="Filter by model" autocomplete="off">
           <input id="usageFilterProvider" placeholder="provider / URL" aria-label="Filter by provider name or upstream URL" autocomplete="off">
+          <input id="usageFilterClientIP" placeholder="client IP" aria-label="Filter by client IP" autocomplete="off">
           <select id="usageFilterKind" aria-label="Filter by kind">
             <option value="">all kinds</option>
             <option value="ai">ai</option>
@@ -305,8 +306,8 @@
           <button type="button" id="usageFilterReset" class="secondary">Reset</button>
         </form>
         <div class="table-wrap">
-          <table id="usageTable">
-            <thead><tr><th>Time</th><th>Request ID</th><th>Kind</th><th>API Key</th><th>Model/Config</th><th>Provider</th><th>Tokens</th><th>Status</th><th>Latency</th><th></th></tr></thead>
+          <table id="usageTable" class="usage-table" data-truncate="true">
+            <thead><tr><th>Time</th><th>Request ID</th><th>Kind</th><th>API Key</th><th>Model/Config</th><th>Provider</th><th>Client IP</th><th>Tokens</th><th>Status</th><th>Latency</th><th></th></tr></thead>
             <tbody></tbody>
           </table>
         </div>
@@ -346,6 +347,29 @@
           <button type="submit">Update password</button>
         </form>
         <p class="hint" id="changePwHint"></p>
+      </div>
+
+      <!-- Gateway-wide IP access rules. Read-only accounts cannot see this
+           panel; the server also rejects the PUT for them. -->
+      <div class="panel admin-only" id="ipAccessPanel">
+        <h2>IP Access Control</h2>
+        <form id="ipAccessForm" class="ip-access-form">
+          <label>
+            Whitelist
+            <textarea id="ipAccessWhitelist" name="whitelist" rows="6" spellcheck="false" placeholder="203.0.113.7&#10;198.51.100.0/24"></textarea>
+          </label>
+          <label>
+            Blacklist
+            <textarea id="ipAccessBlacklist" name="blacklist" rows="6" spellcheck="false" placeholder="192.0.2.44&#10;2001:db8::/32"></textarea>
+          </label>
+          <button type="submit">Save rules</button>
+          <p class="hint">
+            One IP or CIDR per line. An empty whitelist allows every IP; a non-empty whitelist allows only its entries.
+            Blacklisted entries are always denied, even if they also match the whitelist. Loopback addresses
+            (<code>127.0.0.1</code>, <code>::1</code>) are never restricted.
+          </p>
+          <p class="hint" id="ipAccessHint">Loading…</p>
+        </form>
       </div>
 
       <!-- Accounts and roles: hidden for read-only accounts, which is also why
@@ -482,7 +506,7 @@
           <option value="open">/open/* — API key required</option>
           <option value="free">/free/* — public, no key</option>
         </select>
-        <input name="streamTimeoutMs" type="number" min="0" placeholder="stream timeout ms on /free (blank = 300000 = 5 min; 0 = no timeout)">
+        <input name="streamTimeoutMs" type="number" min="0" placeholder="stream idle timeout ms on /free (blank = 300000 = 5 min; 0 = no timeout)">
         <input name="streamMaxBodyMb" type="number" min="0" placeholder="stream body limit MB on /free (blank = 8; 0 = unlimited)">
         <input name="apiKey" placeholder="upstream key (optional)" autocomplete="off">
         <input name="headers" placeholder='{"Authorization":"Bearer ..."} (JSON, optional)'>

@@ -12,14 +12,16 @@ import (
 
 	"relay-api/internal/db"
 	"relay-api/internal/httperr"
+	"relay-api/internal/ipacl"
 	"relay-api/internal/util"
 )
 
 // adminHarness wires the /admin resource routes directly (without the auth
 // middleware, which is covered elsewhere).
 type adminHarness struct {
-	handler http.Handler
-	secrets *util.SecretBox
+	handler  http.Handler
+	secrets  *util.SecretBox
+	ipAccess *ipacl.Store
 }
 
 func newAdminHarness(t *testing.T) adminHarness {
@@ -41,10 +43,12 @@ func newAdminHarness(t *testing.T) adminHarness {
 		t.Fatalf("secret box: %v", err)
 	}
 
+	ipAccess := ipacl.NewStore(nil)
 	mux := http.NewServeMux()
 	NewAdminResources(secrets, 7).Register(mux)
+	NewSettingsRoutes(ipAccess).Register(mux)
 	mux.HandleFunc("/", func(w http.ResponseWriter, _ *http.Request) { httperr.NotFound(w) })
-	return adminHarness{handler: mux, secrets: secrets}
+	return adminHarness{handler: mux, secrets: secrets, ipAccess: ipAccess}
 }
 
 func (h adminHarness) call(t *testing.T, method, path, body string) *httptest.ResponseRecorder {
@@ -286,10 +290,11 @@ func TestAdminUsageLogsAndCleanup(t *testing.T) {
 	provider := "openai"
 	latency := int64(50)
 	okStatus := http.StatusOK
+	clientIP := "203.0.113.9"
 	for i := 0; i < 3; i++ {
 		if err := db.RecordUsage(db.UsageRecord{
 			RequestID: "req-" + itoa(int64(i)), Kind: "ai", Model: &model, Provider: &provider,
-			LatencyMs: &latency, Status: &okStatus,
+			LatencyMs: &latency, Status: &okStatus, ClientIP: &clientIP,
 		}); err != nil {
 			t.Fatalf("record usage: %v", err)
 		}
@@ -321,6 +326,21 @@ func TestAdminUsageLogsAndCleanup(t *testing.T) {
 		decodeInto(t, recorder, &body)
 		if len(body.Data) != 3 {
 			t.Fatalf("model filter returned %d rows", len(body.Data))
+		}
+
+		recorder = harness.call(t, http.MethodGet, "/admin/usage?client_ip=203.0.113", "")
+		decodeInto(t, recorder, &body)
+		if len(body.Data) != 3 {
+			t.Fatalf("client IP prefix filter returned %d rows", len(body.Data))
+		}
+		if body.Data[0].ClientIP == nil || *body.Data[0].ClientIP != clientIP {
+			t.Fatalf("client_ip = %v, want %s", body.Data[0].ClientIP, clientIP)
+		}
+
+		recorder = harness.call(t, http.MethodGet, "/admin/usage?client_ip=198.51.100", "")
+		decodeInto(t, recorder, &body)
+		if len(body.Data) != 0 {
+			t.Fatalf("non-matching client IP returned %d rows", len(body.Data))
 		}
 	})
 

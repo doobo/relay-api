@@ -270,15 +270,11 @@ func adminUsername(auth *middleware.AdminAuth) string {
 	return "token"
 }
 
-// clientIP resolves the caller address, matching the reference's precedence.
+// clientIP resolves the caller address, including Cloudflare's
+// CF-Connecting-IP, and keeps the audit log's historical "unknown" fallback.
 func clientIP(r *http.Request) string {
-	if forwarded := r.Header.Get("X-Forwarded-For"); forwarded != "" {
-		if first := strings.TrimSpace(strings.Split(forwarded, ",")[0]); first != "" {
-			return first
-		}
-	}
-	if realIP := r.Header.Get("X-Real-Ip"); realIP != "" {
-		return realIP
+	if ip := util.ClientIP(r); ip != "" {
+		return ip
 	}
 	return "unknown"
 }

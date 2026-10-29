@@ -76,6 +76,7 @@ export async function loadSettings() {
     // The account list is a management surface: the server rejects it for a
     // read-only account, and its panel is hidden by CSS anyway.
     if (!isAdmin()) return;
+    await loadIPAccess();
     const data = await api("/admin/auth/users");
     fillTable(
       "adminUsersTable",
@@ -94,6 +95,31 @@ export async function loadSettings() {
     );
   } catch (e) {
     fillTableMessage("adminUsersTable", `Failed to load: ${e.message}`, { error: true });
+  }
+}
+
+/** One IP or CIDR per line; blank lines are ignored by the server too. */
+function splitIPLines(value) {
+  return String(value ?? "")
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter(Boolean);
+}
+
+function renderIPAccess(settings) {
+  el("ipAccessWhitelist").value = (settings.whitelist ?? []).join("\n");
+  el("ipAccessBlacklist").value = (settings.blacklist ?? []).join("\n");
+  const updated = settings.updated_at ? fmtTime(settings.updated_at) : "never";
+  el("ipAccessHint").textContent = `Rules last updated: ${updated}. Loopback addresses are always allowed.`;
+  el("ipAccessHint").classList.remove("error");
+}
+
+async function loadIPAccess() {
+  try {
+    renderIPAccess(await api("/admin/settings/ip-access"));
+  } catch (e) {
+    el("ipAccessHint").textContent = `Failed to load IP rules: ${e.message}`;
+    el("ipAccessHint").classList.add("error");
   }
 }
 
@@ -185,6 +211,26 @@ export function initSettings() {
       // rides along to the login page's own notice line rather than a toast.
       setSignOutStatus("Password changed - sign in again with the new password.");
       setToken("");
+    } catch (e) {
+      notifyError(e.message, { form: event.target });
+    }
+  };
+
+  el("ipAccessForm").onsubmit = async (event) => {
+    event.preventDefault();
+    clearNotice(event.target);
+    const form = new FormData(event.target);
+    try {
+      const data = await api("/admin/settings/ip-access", {
+        method: "PUT",
+        body: JSON.stringify({
+          whitelist: splitIPLines(form.get("whitelist")),
+          blacklist: splitIPLines(form.get("blacklist")),
+        }),
+      });
+      renderIPAccess(data);
+      el("ipAccessHint").textContent =
+        `Saved ${data.whitelist.length} whitelist and ${data.blacklist.length} blacklist entries. Loopback addresses are always allowed.`;
     } catch (e) {
       notifyError(e.message, { form: event.target });
     }

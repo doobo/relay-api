@@ -13,6 +13,7 @@ import (
 	"os"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"golang.org/x/net/http2"
@@ -38,6 +39,15 @@ const (
 	dialTimeout         = 10 * time.Second
 	dialKeepAlive       = 30 * time.Second
 	tlsSessionCacheSize = 512
+	// A 1 MiB HTTP/2 frame cuts frame-header overhead on bulk relay traffic
+	// while staying well below the 16 MiB maximum (each connection may have to
+	// buffer one frame per direction).
+	upstreamMaxReadFrameSize = 1 << 20
+	// Ping an HTTP/2 connection after this much silence. A long-lived stream
+	// can otherwise sit on a connection whose peer disappeared without a FIN;
+	// the ping turns that into a prompt connection failure.
+	upstreamHTTP2SendPing = 30 * time.Second
+	upstreamHTTP2PingWait = 15 * time.Second
 )
 
 // httpsTransport serves TLS upstreams (and plaintext HTTP/1.1 upstreams while
@@ -62,6 +72,16 @@ var httpsTransport = &http.Transport{
 	TLSClientConfig: &tls.Config{
 		ClientSessionCache: tls.NewLRUClientSessionCache(tlsSessionCacheSize),
 	},
+	// Tune HTTP/2 itself: bigger frames reduce framing overhead, and the ping
+	// timeout detects an upstream connection that died silently during a long
+	// stream. Go's HTTP/2 defaults otherwise apply (notably a 1 MiB receive
+	// window per stream), so a high-BDP upstream is not throttled to
+	// window/RTT.
+	HTTP2: &http.HTTP2Config{
+		MaxReadFrameSize: upstreamMaxReadFrameSize,
+		SendPingTimeout:  upstreamHTTP2SendPing,
+		PingTimeout:      upstreamHTTP2PingWait,
+	},
 }
 
 // h2cTransport serves cleartext HTTP/2 upstreams. It is nil unless
@@ -77,6 +97,11 @@ func newH2CTransport() http.RoundTripper {
 	}
 	return &http2.Transport{
 		AllowHTTP: true,
+		// Match the TLS transport's frame size and silence detection so an
+		// h2c upstream gets the same throughput and dead-connection handling.
+		MaxReadFrameSize: upstreamMaxReadFrameSize,
+		ReadIdleTimeout:  upstreamHTTP2SendPing,
+		PingTimeout:      upstreamHTTP2PingWait,
 		// AllowHTTP makes the transport use h2c for http:// URLs, so the dialer
 		// must hand back a plain connection instead of a TLS one. Note that
 		// http2.Transport multiplexes every stream over one connection and does
@@ -126,6 +151,13 @@ type FetchOptions struct {
 	// hold the request open forever: once headers arrive the timer stops and
 	// the body may stream for as long as it needs.
 	HeaderTimeoutMs int
+	// IdleTimeoutMs bounds inactivity while reading a streaming response
+	// body. The timer restarts on every byte received, so a long-lived stream
+	// that keeps producing data may run past it, while one that stops
+	// producing data is cancelled (ErrUpstreamTimeout) instead of pinning the
+	// handler forever. Ignored when TimeoutMs > 0, because that already bounds
+	// the whole call.
+	IdleTimeoutMs int
 	// URL, when set, is used directly instead of parsing rawURL. Callers that
 	// already hold a parsed URL (a cached provider base, or a validated config
 	// target) skip url.Parse on every request. The value is copied, so callers
@@ -145,7 +177,7 @@ type FetchOptions struct {
 // response.Body afterwards, and cancelling on return would truncate every
 // streamed body. So the cancel function is deferred to the body's Close.
 func FetchUpstream(ctx context.Context, rawURL string, opts FetchOptions) (*http.Response, error) {
-	if opts.TimeoutMs <= 0 && opts.HeaderTimeoutMs <= 0 {
+	if opts.TimeoutMs <= 0 && opts.HeaderTimeoutMs <= 0 && opts.IdleTimeoutMs <= 0 {
 		return do(ctx, rawURL, opts)
 	}
 
@@ -191,8 +223,52 @@ func FetchUpstream(ctx context.Context, rawURL string, opts FetchOptions) (*http
 		cancel()
 		return response, nil
 	}
-	response.Body = &cancelOnClose{ReadCloser: response.Body, cancel: cancel}
+	body := response.Body
+	if opts.TimeoutMs <= 0 && opts.IdleTimeoutMs > 0 {
+		body = newIdleTimeoutBody(body, cancel, time.Duration(opts.IdleTimeoutMs)*time.Millisecond)
+	}
+	response.Body = &cancelOnClose{ReadCloser: body, cancel: cancel}
 	return response, nil
+}
+
+// idleTimeoutBody cancels the request when the upstream stops producing body
+// bytes for the configured interval. Resetting on every read (rather than using
+// a single deadline) lets an active long-lived stream outlive the timeout while
+// still reaping one that has silently stalled.
+type idleTimeoutBody struct {
+	io.ReadCloser
+	cancel  context.CancelFunc
+	timeout time.Duration
+	timer   *time.Timer
+	fired   atomic.Bool
+}
+
+func newIdleTimeoutBody(body io.ReadCloser, cancel context.CancelFunc, timeout time.Duration) *idleTimeoutBody {
+	idle := &idleTimeoutBody{ReadCloser: body, cancel: cancel, timeout: timeout}
+	idle.timer = time.AfterFunc(timeout, func() {
+		idle.fired.Store(true)
+		cancel()
+	})
+	return idle
+}
+
+func (b *idleTimeoutBody) Read(p []byte) (int, error) {
+	n, err := b.ReadCloser.Read(p)
+	if b.fired.Load() {
+		return n, fmt.Errorf("%w after %dms", ErrUpstreamTimeout, b.timeout.Milliseconds())
+	}
+	if n > 0 {
+		b.timer.Reset(b.timeout)
+	}
+	if err != nil {
+		b.timer.Stop()
+	}
+	return n, err
+}
+
+func (b *idleTimeoutBody) Close() error {
+	b.timer.Stop()
+	return b.ReadCloser.Close()
 }
 
 // cancelOnClose releases the timeout context when the body is closed.
