@@ -62,7 +62,7 @@
   <header class="app-header app-view hidden">
     <div class="brand">
       <img class="brand-mark" src="/favicon.svg" alt="" aria-hidden="true">
-      <h1 id="appTitle" class="app-title" title="Click to refresh" role="button" tabindex="0">Relay-Api</h1>
+      <h1 id="appTitle" class="app-title" title="Back to Dashboard" role="button" tabindex="0">Relay-Api</h1>
     </div>
     <div class="header-actions">
       <!-- Palette list lives in base.css; the header picker and the one on the
@@ -483,33 +483,79 @@
     </div>
     <form id="configForm" class="dialog-form" data-id="" data-mode="create">
       <div class="dialog-body">
-        <input name="name" placeholder="name e.g. weather, api/*, api/**" required>
-        <input name="url" placeholder="https://api.example.com/weather" required>
-        <select name="method" id="configMethod">
-          <option value="POST">POST</option>
-          <option value="GET">GET</option>
-          <option value="PUT">PUT</option>
-          <option value="DELETE">DELETE</option>
-          <option value="PATCH">PATCH</option>
-          <option value="NONE">None (any method)</option>
-          <option value="">Custom…</option>
-        </select>
-        <input name="customMethod" id="configCustomMethod" placeholder="custom method" class="hidden" maxlength="16">
-        <select name="route" id="configRoute" aria-label="Route">
-          <option value="open">/open/* — API key required</option>
-          <option value="free">/free/* — public, no key</option>
-        </select>
-        <input name="streamTimeoutMs" type="number" min="0" placeholder="stream idle timeout ms on /free (blank = 300000 = 5 min; 0 = no timeout)">
-        <input name="streamMaxBodyMb" type="number" min="0" placeholder="stream body limit MB on /free (blank = 8; 0 = unlimited)">
         <label class="field">
-          <span>Upstream h2c</span>
-          <input type="checkbox" name="upstreamH2C">
+          <span>Name</span>
+          <input name="name" placeholder="e.g. weather, api/*, api/**" required>
         </label>
-        <p class="hint">Cleartext HTTP/2 for http:// URLs; enable only if the upstream supports it.</p>
-        <input name="apiKey" placeholder="upstream key (optional)" autocomplete="off">
-        <input name="headers" placeholder='{"Authorization":"Bearer ..."} (JSON, optional)'>
-        <input name="requestTemplate" placeholder='{"city":"{{body.city}}"} (JSON, optional)'>
-        <input name="responseTemplate" placeholder='{"content":"{{data.result}}"} (JSON, optional)'>
+        <label class="field">
+          <span>Upstream URL</span>
+          <input name="url" placeholder="https://api.example.com/weather" required>
+        </label>
+        <label class="field">
+          <span>Method</span>
+          <select name="method" id="configMethod">
+            <option value="POST">POST</option>
+            <option value="GET">GET</option>
+            <option value="PUT">PUT</option>
+            <option value="DELETE">DELETE</option>
+            <option value="PATCH">PATCH</option>
+            <option value="NONE">None (any method)</option>
+            <option value="">Custom…</option>
+          </select>
+        </label>
+        <label class="field hidden" id="configCustomMethodField">
+          <span>Custom method</span>
+          <input name="customMethod" id="configCustomMethod" placeholder="e.g. HEAD" maxlength="16">
+        </label>
+        <label class="field">
+          <span>Route</span>
+          <select name="route" id="configRoute">
+            <option value="open">/open/* — API key required</option>
+            <option value="free">/free/* — public, no key</option>
+          </select>
+        </label>
+
+        <fieldset>
+          <legend>Upstream</legend>
+          <label class="field">
+            <span>API key</span>
+            <input name="apiKey" placeholder="upstream key (optional)" autocomplete="off">
+          </label>
+          <label class="field">
+            <span>Headers (JSON)</span>
+            <input name="headers" placeholder='{"Authorization":"Bearer ..."}'>
+          </label>
+          <p class="hint">Header values support templates like <code>{{headers.x}}</code> and <code>{{query.q}}</code>.</p>
+          <label class="check-row"><input type="checkbox" name="upstreamH2C"> upstream h2c</label>
+        </fieldset>
+
+        <fieldset>
+          <legend>/free tunnel limits</legend>
+          <div class="field-grid">
+            <label class="field">
+              <span>Stream idle timeout (ms)</span>
+              <input name="streamTimeoutMs" type="number" min="0" placeholder="300000">
+            </label>
+            <label class="field">
+              <span>Body limit (MB)</span>
+              <input name="streamMaxBodyMb" type="number" min="0" placeholder="8">
+            </label>
+          </div>
+          <p class="hint">Blank keeps the default (300000 ms / 8 MB); 0 means unlimited.</p>
+        </fieldset>
+
+        <fieldset>
+          <legend>Templates (optional)</legend>
+          <label class="field">
+            <span>Request template (JSON)</span>
+            <input name="requestTemplate" placeholder='{"city":"{{body.city}}"}'>
+          </label>
+          <label class="field">
+            <span>Response template (JSON)</span>
+            <input name="responseTemplate" placeholder='{"content":"{{data.result}}"}'>
+          </label>
+        </fieldset>
+
         <label class="check-row"><input type="checkbox" name="enabled"> enabled</label>
       </div>
       <div class="dialog-actions">
@@ -610,15 +656,12 @@
           <input name="providerSearch" placeholder="search by name" autocomplete="off" list="providerEditOptions">
         </label>
         <datalist id="providerEditOptions"></datalist>
-        <label class="field">
-          <span>Provider ID</span>
-          <input name="providerId" placeholder="provider id" type="number" inputmode="numeric" required>
-        </label>
+        <input type="hidden" name="providerId">
         <label class="field">
           <span>Upstream model</span>
           <input name="upstreamModel" placeholder="e.g. gpt-5" required>
         </label>
-        <p class="hint">Start typing a provider name to filter the list; picking one fills the provider ID. Aliases must be unique.</p>
+        <p class="hint">Start typing a provider name to filter the list; pick one from the suggestions. Aliases must be unique.</p>
         <label class="check-row"><input type="checkbox" name="enabled"> enabled</label>
       </div>
       <div class="dialog-actions">

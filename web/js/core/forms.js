@@ -13,6 +13,15 @@ export const METHOD_NONE = "NONE";
 const SELECT_METHODS = [...COMMON_METHODS, METHOD_NONE];
 
 /**
+ * The element to hide/show for the custom-method input. When the control is
+ * wrapped in a labeled field the whole field is hidden, so its caption does not
+ * linger on its own.
+ */
+function toggleTarget(control) {
+  return control.closest("label.field") || control;
+}
+
+/**
  * Wire a method <select> + "Custom…" input pair. Selecting Custom… reveals the
  * free-text input; picking any listed method (common verbs and None) hides and
  * clears it.
@@ -20,7 +29,7 @@ const SELECT_METHODS = [...COMMON_METHODS, METHOD_NONE];
 export function bindMethodSelect(selectEl, customInput) {
   selectEl.addEventListener("change", () => {
     const isCustom = selectEl.value === "";
-    customInput.classList.toggle("hidden", !isCustom);
+    toggleTarget(customInput).classList.toggle("hidden", !isCustom);
     if (isCustom) customInput.focus();
     else customInput.value = "";
   });
@@ -31,11 +40,11 @@ export function setMethodValue(selectEl, customInput, method) {
   const value = (method || "POST").toUpperCase();
   if (SELECT_METHODS.includes(value)) {
     selectEl.value = value;
-    customInput.classList.add("hidden");
+    toggleTarget(customInput).classList.add("hidden");
     customInput.value = "";
   } else {
     selectEl.value = "";
-    customInput.classList.remove("hidden");
+    toggleTarget(customInput).classList.remove("hidden");
     customInput.value = value;
   }
 }

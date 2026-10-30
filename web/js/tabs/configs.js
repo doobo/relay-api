@@ -110,7 +110,7 @@ function openConfigDialog(mode, cfg) {
   form.dataset.id = cfg ? String(cfg.id) : "";
 
   const title = el("configDialogTitle");
-  if (mode === "edit" && cfg) title.replaceChildren("Edit config ", nameWithTag(cfg));
+  if (mode === "edit" && cfg) title.replaceChildren("Edit config: ", nameWithTag(cfg));
   else title.textContent = "Add config";
   el("configDialogSubmit").textContent = mode === "edit" ? "Save" : "Create";
 

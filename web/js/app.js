@@ -7,7 +7,7 @@ import { getToken, onTokenChange } from "./core/api.js";
 import { initAuth } from "./core/auth.js";
 import { el } from "./core/dom.js";
 import { loadRole } from "./core/perms.js";
-import { initTabBar, refreshActiveTab, registerTab } from "./core/tabs.js";
+import { initTabBar, refreshActiveTab, registerTab, restoreTabFromHash, selectTab } from "./core/tabs.js";
 import { initTheme } from "./core/theme.js";
 import { initConfigs, loadConfigs } from "./tabs/configs.js";
 import { loadDashboard } from "./tabs/dashboard.js";
@@ -33,6 +33,9 @@ const tabs = {
 function init() {
   for (const [name, loader] of Object.entries(tabs)) registerTab(name, loader);
   initTabBar();
+  // Land on the tab named by the URL before the first data refresh, so a
+  // reload keeps the user where they were.
+  restoreTabFromHash();
   initTheme();
   initAuth();
   initTitleRefresh();
@@ -74,14 +77,14 @@ async function refreshWithRole() {
   refreshActiveTab();
 }
 
-/** Clicking the header title reloads the visible tab's data. */
+/** Clicking the header brand returns to (and reloads) the Dashboard tab. */
 function initTitleRefresh() {
   const title = el("appTitle");
-  title.onclick = () => refreshActiveTab();
+  title.onclick = () => selectTab("dashboard");
   title.onkeydown = (event) => {
     if (event.key === "Enter" || event.key === " ") {
       event.preventDefault();
-      refreshActiveTab();
+      selectTab("dashboard");
     }
   };
 }

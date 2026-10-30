@@ -45,8 +45,11 @@ function bindProviderPicker(searchInput, providerIdInput, datalistId) {
 
 function resolveProviderId(searchValue, fallbackId) {
   const value = (searchValue || "").trim().toLowerCase();
+  if (!value) return Number(fallbackId);
   const picked = cachedProviders().find((p) => p.name.toLowerCase() === value);
-  return picked ? picked.id : Number(fallbackId);
+  // A non-empty search that matches no provider name must not silently fall
+  // back to a stale ID (the ID field is hidden, so the user cannot see it).
+  return picked ? picked.id : 0;
 }
 
 export async function loadModels() {
@@ -122,7 +125,7 @@ export function initModels() {
     clearNotice(form);
     const providerId = resolveProviderId(form.elements.providerSearch.value, form.elements.providerId.value);
     if (!providerId) {
-      notifyError("Pick a provider by name or enter a provider id", { form });
+      notifyError("Pick a provider from the search suggestions", { form });
       return;
     }
     const body = {
