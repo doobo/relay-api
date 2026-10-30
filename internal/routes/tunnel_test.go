@@ -718,3 +718,67 @@ func TestTunnelCopyBufferSize(t *testing.T) {
 		t.Fatalf("relayed %d bytes (recorder %d), want %d", written, recorder.Body.Len(), len(payload))
 	}
 }
+
+// sizeRecordingReader records the buffer size copyAndFlush passes to each Read,
+// so a test can see the small-to-large chunk promotion without reaching into
+// the pools.
+type sizeRecordingReader struct {
+	reads []int
+	data  []byte
+}
+
+func (r *sizeRecordingReader) Read(p []byte) (int, error) {
+	r.reads = append(r.reads, len(p))
+	if len(r.data) == 0 {
+		return 0, io.EOF
+	}
+	n := copy(p, r.data)
+	r.data = r.data[n:]
+	return n, nil
+}
+
+// TestTunnelCopyBufferStartsSmall pins the adaptive copy buffer: a response
+// starts with the 8 KiB chunk and only a full small read promotes it to the
+// configured large chunk. That keeps an idle tunnel at 8 KiB instead of the
+// configured size, while a bulk transfer still gets large reads.
+func TestTunnelCopyBufferStartsSmall(t *testing.T) {
+	t.Cleanup(func() { SetTunnelCopyBufferSize(defaultTunnelCopyBuffer) })
+	const large = 128 * 1024
+	SetTunnelCopyBufferSize(large)
+
+	t.Run("small body stays small", func(t *testing.T) {
+		src := &sizeRecordingReader{data: bytes.Repeat([]byte("x"), 4*1024)}
+		recorder := httptest.NewRecorder()
+		written, err := copyAndFlush(recorder, src)
+		if err != nil {
+			t.Fatalf("copyAndFlush: %v", err)
+		}
+		if written != 4*1024 || recorder.Body.Len() != 4*1024 {
+			t.Fatalf("relayed %d bytes (recorder %d), want 4096", written, recorder.Body.Len())
+		}
+		for _, size := range src.reads {
+			if size != tunnelSmallBuffer {
+				t.Fatalf("read sizes = %v, want all %d", src.reads, tunnelSmallBuffer)
+			}
+		}
+	})
+
+	t.Run("full small read promotes", func(t *testing.T) {
+		payload := bytes.Repeat([]byte("x"), 300*1024)
+		src := &sizeRecordingReader{data: payload}
+		recorder := httptest.NewRecorder()
+		written, err := copyAndFlush(recorder, src)
+		if err != nil {
+			t.Fatalf("copyAndFlush: %v", err)
+		}
+		if written != int64(len(payload)) || recorder.Body.Len() != len(payload) {
+			t.Fatalf("relayed %d bytes (recorder %d), want %d", written, recorder.Body.Len(), len(payload))
+		}
+		if len(src.reads) < 2 {
+			t.Fatalf("read sizes = %v, want a promotion to %d", src.reads, large)
+		}
+		if src.reads[0] != tunnelSmallBuffer || src.reads[1] != large {
+			t.Fatalf("read sizes = %v, want [%d %d ...]", src.reads, tunnelSmallBuffer, large)
+		}
+	})
+}

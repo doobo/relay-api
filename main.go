@@ -2,8 +2,8 @@
 // OpenAI-compatible API relay with an embedded admin UI.
 //
 // The defining difference from the reference implementation is the listener:
-// Go serves HTTP/1.1 and cleartext HTTP/2 (h2c) on the same port via
-// golang.org/x/net/http2/h2c, so there is no separate H2C_PORT.
+// Go serves HTTP/1.1 and cleartext HTTP/2 (h2c) on the same port via net/http's
+// native Protocols support, so there is no separate H2C_PORT.
 package main
 
 import (
@@ -16,9 +16,6 @@ import (
 	"strconv"
 	"syscall"
 	"time"
-
-	"golang.org/x/net/http2"
-	"golang.org/x/net/http2/h2c"
 
 	"relay-api/internal/config"
 	"relay-api/internal/db"
@@ -157,38 +154,47 @@ func main() {
 	// route matched: the embedded UI answers those.
 	mux.Handle("/", web.Handler())
 
-	// h2c.NewHandler sniffs each accepted connection: a cleartext HTTP/2
-	// preface (PRI * HTTP/2.0) or an "Upgrade: h2c" request is served as
-	// HTTP/2, everything else falls through to the standard HTTP/1.1 server.
-	// One port covers both, replacing the reference's H2C_PORT.
+	// net/http serves HTTP/1.1 and cleartext HTTP/2 (h2c) on one listener when
+	// both protocols are enabled; this replaces the x/net/http2/h2c wrapper
+	// and needs no separate H2C_PORT.
 	//
 	// XHTTP fans one client into many parallel streams, so the per-stream and
-	// per-connection receive windows are widened (the library defaults to 1 MiB
-	// each) to keep a high-BDP cross-region link from being throttled to
-	// window/RTT, and more concurrent streams are allowed per connection
-	// (default 250; H2C_MAX_CONCURRENT_STREAMS, default 2048). This limit is a
+	// per-connection receive windows are widened above the 1 MiB default to
+	// keep a high-BDP cross-region link from being throttled to window/RTT,
+	// and more concurrent streams are allowed per connection (default 250;
+	// H2C_MAX_CONCURRENT_STREAMS, default 2048). This limit is a
 	// connection-level SETTINGS value: it applies to new connections only, so a
 	// change needs a restart, and it is not per api_config. Streams beyond it
 	// are refused (REFUSED_STREAM), which a compliant client retries on another
 	// connection; each accepted stream may hold an upload buffer plus the
 	// relay's copy chunk, so raising it far has a memory cost.
 	//
-	// No IdleTimeout is set deliberately: SSE streams and the /free tunnel are
-	// long-lived and may sit idle, so idle control stays in the handlers
-	// (STREAM_IDLE_TIMEOUT_MS).
-	h2s := &http2.Server{
-		MaxConcurrentStreams:         uint32(cfg.H2CMaxConcurrentStreams),
-		MaxReadFrameSize:             1 << 20,
-		MaxUploadBufferPerStream:     2 << 20,
-		MaxUploadBufferPerConnection: 8 << 20,
-	}
+	// ReadTimeout/WriteTimeout stay unset: both are total-duration limits and
+	// SSE plus /free tunnels are long-lived. IdleTimeout only reaps a
+	// connection between requests, and WriteByteTimeout only a write that has
+	// stopped making progress, so neither cuts an active stream.
+	protocols := new(http.Protocols)
+	protocols.SetHTTP1(true)
+	protocols.SetUnencryptedHTTP2(true)
 	srv := &http.Server{
 		Addr:              ":" + strconv.Itoa(cfg.Port),
-		Handler:           h2c.NewHandler(middleware.RequestLog(middleware.IPAccess(ipAccess)(mux), cfg.AccessLogSkipPrefixes...), h2s),
+		Handler:           middleware.RequestLog(middleware.IPAccess(ipAccess)(mux), cfg.AccessLogSkipPrefixes...),
 		ReadHeaderTimeout: 10 * time.Second,
-		// Deliberately no WriteTimeout/ReadTimeout: SSE chat streams and the
-		// /free tunnel are long-lived. Idle control lives in the handlers
-		// (STREAM_IDLE_TIMEOUT_MS), not in the server.
+		IdleTimeout:       time.Duration(cfg.ServerIdleTimeoutMs) * time.Millisecond,
+		// Request headers are a few KiB in practice; 64 KiB leaves room for
+		// large tokens/cookies without letting a peer make the server buffer
+		// megabytes before authentication.
+		MaxHeaderBytes: 64 << 10,
+		HTTP2: &http.HTTP2Config{
+			MaxConcurrentStreams:          cfg.H2CMaxConcurrentStreams,
+			MaxReadFrameSize:              64 << 10,
+			MaxReceiveBufferPerConnection: 2 << 20,
+			MaxReceiveBufferPerStream:     1 << 20,
+			WriteByteTimeout:              time.Duration(cfg.SendTimeoutMs) * time.Millisecond,
+			SendPingTimeout:               30 * time.Second,
+			PingTimeout:                   15 * time.Second,
+		},
+		Protocols: protocols,
 	}
 
 	// Automatic log retention: run once at startup (so frequent restarts cannot

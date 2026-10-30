@@ -68,6 +68,8 @@ CGO_ENABLED=0 go build -trimpath -ldflags "-s -w" -o relay-api .
 | `REQUEST_SIZE_LIMIT_MB` | `10` | `/v1/*` 与 `/open/*` 的请求体大小上限（MB）；`/free/*` 不受此限制 |
 | `REQUEST_TIMEOUT_MS` | `120000` | 非流式聊天请求与 `/open/*` 转发的上游超时（毫秒） |
 | `STREAM_IDLE_TIMEOUT_MS` | `60000` | SSE 流无数据块的最长空闲时间（毫秒），超时主动断开 |
+| `SERVER_IDLE_TIMEOUT_MS` | `75000` | keep-alive 连接在两次请求之间的最长空闲时间（毫秒）；只在请求之间生效，不会打断进行中的 SSE 流或 `/free` 隧道 |
+| `SEND_TIMEOUT_MS` | `60000` | 向客户端写入连续无进展多久后关闭连接（毫秒）；HTTP/2 按 DATA 帧生效，HTTP/1.1 在 `/free` 每次写入时顺延 |
 | `UPSTREAM_MAX_RETRIES` | `1` | 单个路由遇到可重试错误（网络错误/超时/408/429/5xx）后的额外重试次数；`0` 关闭重试 |
 | `UPSTREAM_RETRY_BASE_MS` | `250` | 首次重试的退避基数（毫秒），之后按 2 倍递增 |
 | `UPSTREAM_RETRY_MAX_MS` | `4000` | 单次退避的上限（毫秒） |
@@ -76,7 +78,7 @@ CGO_ENABLED=0 go build -trimpath -ldflags "-s -w" -o relay-api .
 | `UPSTREAM_BREAKER_COOLDOWN_MS` | `30000` | 熔断持续时间（毫秒），到期后放行一个探测请求 |
 | `ACCESS_LOG_SKIP_PREFIXES` | `/free` | 不写访问日志的路径前缀（逗号分隔）；请求 ID 仍会生成，设为空可记录所有请求 |
 | `TUNNEL_USAGE_SAMPLE` | `10` | `/free` 成功请求写入用量日志的采样率，`N` 表示每 N 条记录 1 条；错误请求始终记录 |
-| `TUNNEL_COPY_BUFFER_KB` | `64` | `/free` 转发时每响应占用的拷贝块大小（KiB，会被夹在 32 KiB~1 MiB 之间）。乘以并发隧道数即为常驻内存；高带宽长连接部署可调到 `128`，配合 `GOMEMLIMIT` 使用 |
+| `TUNNEL_COPY_BUFFER_KB` | `64` | `/free` 转发时可升级到的拷贝块大小（KiB，会被夹在 32 KiB~1 MiB 之间）。每条响应先使用 8 KiB 小块，只有读满小块时才升级到该值，因此空闲隧道只占 8 KiB；乘以并发隧道数即为常驻内存的大致上限，高带宽长连接部署可调到 `128`，配合 `GOMEMLIMIT` 使用 |
 | `H2C_MAX_CONCURRENT_STREAMS` | `2048` | 每条 h2c/h2 连接向客户端公告的最大并发流数（连接级 SETTINGS，仅对新连接生效，修改需重启）。它不是按 API Config 配置的：一条连接上所有配置共用同一上限；超限的流会被 `REFUSED_STREAM`，由客户端重试，且每条流都可能占用上传缓冲与拷贝块 |
 | `USAGE_HEADER_SNAPSHOTS` | `true` | 是否在用量日志中保存请求/上游 header 快照；设为 `false` 可减少 CPU 开销与数据库体积 |
 | `LOG_RETENTION_DAYS` | `7` | 用量/审计日志保留天数；`0` 表示永久保留。周/月配额不依赖日志（见“配额与日志保留”），可以放心设短 |
@@ -169,7 +171,7 @@ OpenAI 格式的客户端（OpenCode、绝大多数 agent）不会把 `reasoning
 
 ```
 .
-├── main.go                  # 程序入口：装配中间件、路由、h2c 服务与优雅退出
+├── main.go                  # 程序入口：装配中间件、路由、原生 h2c 服务与优雅退出
 ├── go.mod / go.sum
 ├── deploy/relay-api.service # systemd 示例（LimitNOFILE / GOMEMLIMIT）
 ├── task.md                  # 原始任务说明
@@ -232,7 +234,7 @@ make clean-dist                       # 删除 dist/
 - 持久化 `DATABASE_PATH` 指向的目录，并同时保留 `SECRET_KEY_FILE`，二者需一起备份
 - 访问日志经有界队列（8192 条）批量异步写入 stdout：攒到 64 KiB 或 **100 行**（先到者）即刷一批，最多等 200 ms；请求线程只入队，stdout 被阻塞时不会拖慢网站或 `/v1`，队列满的日志会被丢弃并在下一次落盘时输出 `dropped=N` 统计；请确保日志消费者（docker logs、面板、重定向文件）正常读取
 - 仪表盘“今日”统计由内存计数器维护：启动时从 SQLite 预热一次，之后随用量写入实时递增，不会随着 `usage_logs` 变大而变慢；`/admin/stats` 默认不返回全量配置统计，脚本需要时加 `?full=1`
-- 服务器层刻意不设置 `WriteTimeout`/`ReadTimeout`（长连接 SSE 与 `/free` 隧道需要），空闲控制由 `STREAM_IDLE_TIMEOUT_MS` 在处理器内完成
+- 服务器层刻意不设置 `WriteTimeout`/`ReadTimeout`（二者都是总时长限制，长连接 SSE 与 `/free` 隧道需要），改用 `SERVER_IDLE_TIMEOUT_MS` 回收请求间的空闲连接、`SEND_TIMEOUT_MS` 处理写不动的客户端；处理器内再用 `STREAM_IDLE_TIMEOUT_MS` 控制上游空闲
 - 反向代理需允许长连接并关闭响应缓冲（Nginx 参考：`proxy_buffering off;`），否则流式响应会被缓冲
 
 ### 容量与资源上限
@@ -247,14 +249,14 @@ make clean-dist                       # 删除 dist/
   ```
 
   默认的 1024 软上限大约只能撑 500 条并发隧道，达到上限后 `accept()` 报 `EMFILE`，**包括 `/v1` 在内的所有新请求都会被拒绝**。
-- **单条隧道的内存**：`copyAndFlush` 的拷贝块（`TUNNEL_COPY_BUFFER_KB`，默认 64 KiB）在整条响应期间都会占住（包括阻塞在读取、暂时没有数据时），所以内存约等于 `块大小 × 并发隧道数`：64 KiB 时 3000 条并发隧道约 190 MiB，调到 128 KiB 则约 375 MiB，另有每条隧道的 goroutine 栈与 http2 流控缓冲。块大小会与 `H2C_MAX_CONCURRENT_STREAMS` 相乘，两者一起调大前先按并发数估算。
+- **单条隧道的内存**：`copyAndFlush` 先取 8 KiB 小块，只有一次读满 8 KiB（说明上游还有大量数据排队）才升级到 `TUNNEL_COPY_BUFFER_KB`（默认 64 KiB）的大块，且升级后不再降级。大多数 XHTTP 短请求/慢速长连接始终停在 8 KiB，3000 条并发约 24 MiB；满载的大流量隧道才按 64 KiB 计（约 190 MiB 的上限），另有每条隧道的 goroutine 栈与 http2 流控缓冲。`H2C_MAX_CONCURRENT_STREAMS` 决定单连接最多能同时存在多少条这样的流，两者一起调大前先按并发数估算。
 - **HTTP/2 并发流**：`H2C_MAX_CONCURRENT_STREAMS`（默认 2048）是**连接级** SETTINGS，不是按 API Config 配置的；它只影响新连接（改完需重启），超限的流返回 `REFUSED_STREAM` 由客户端重试。另外端到端并发还受上游那一跳公告的流数上限约束，一味调大入口上限可能只是把排队位置前移。
 - **堆上限**：建议给 Go 设置软上限 `GOMEMLIMIT`（约为容器内存的 60%~75%），否则运行时可能要等到约 2 倍活跃堆才 GC，突发缓冲很容易把内存顶爆：
 
   ```bash
   GOMEMLIMIT=1200MiB ./relay-api
   ```
-- **`/free` 的默认限额**：新建配置默认 `streamTimeoutMs=300000`（5 分钟）与 `streamMaxBodyMb=8`；其中 `streamTimeoutMs` 是**空闲超时**而不是总时长——等待响应头的时间、以及响应体两次数据之间的间隔受它限制，持续有数据的长连接不会被强制断开。显式填 `0` 表示不限（旧库升级时会把历史配置里的 0 一次性改成这两个默认值，之后手动设 0 不会被覆盖）。没有超时的隧道在客户端/上游异常消失时会永久占住 fd 和缓冲，因此不建议把超时设为 0。
+- **`/free` 的默认限额**：新建配置默认 `streamTimeoutMs=300000`（5 分钟）与 `streamMaxBodyMb=8`；其中 `streamTimeoutMs` 是**空闲超时**而不是总时长——等待响应头的时间、客户端上传两次数据之间的间隔、以及响应体两次数据之间的间隔受它限制，持续有数据的长连接不会被强制断开。显式填 `0` 表示不限（旧库升级时会把历史配置里的 0 一次性改成这两个默认值，之后手动设 0 不会被覆盖）。没有超时的隧道在客户端/上游异常消失时会永久占住 fd 和缓冲，因此不建议把超时设为 0。
 - **按客户端限并发**：代码里没有针对 `/free` 的按 IP 并发限制（该路径完全公开）。需要防风控时在前置 Nginx/HAProxy 上限制，例如：
 
   ```nginx
@@ -272,7 +274,7 @@ make clean-dist                       # 删除 dist/
 | 模块 | 协议 | 用途 |
 | --- | --- | --- |
 | `golang.org/x/crypto` | BSD-3-Clause | bcrypt 密码哈希、登录挑战的 nacl/box |
-| `golang.org/x/net` | BSD-3-Clause | `http2` 与 `h2c`（单端口明文 HTTP/2） |
+| `golang.org/x/net` | BSD-3-Clause | `http2`（h2c 上游客户端）；服务端的单端口明文 HTTP/2 已改用标准库 `net/http` |
 | `modernc.org/sqlite` | BSD-3-Clause | 纯 Go SQLite 驱动；内嵌的 SQLite 本体为 Public Domain |
 | `modernc.org/libc`、`modernc.org/mathutil`、`modernc.org/memory` | BSD-3-Clause | 间接依赖（`modernc.org/sqlite` 使用） |
 | `golang.org/x/sys`、`golang.org/x/text` | BSD-3-Clause | 间接依赖 |

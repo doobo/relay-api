@@ -7,19 +7,21 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"testing"
-
-	"golang.org/x/net/http2"
-	"golang.org/x/net/http2/h2c"
 )
 
 // TestFetchUpstreamH2COptIn pins the per-request switch: plaintext upstreams
 // stay on HTTP/1.1 unless the caller opts in, and the opt-in reaches an h2c
-// server as HTTP/2.
+// server as HTTP/2. The test server uses net/http's native h2c support, the
+// same protocol setup main.go serves with.
 func TestFetchUpstreamH2COptIn(t *testing.T) {
-	handler := h2c.NewHandler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	protocols := new(http.Protocols)
+	protocols.SetHTTP1(true)
+	protocols.SetUnencryptedHTTP2(true)
+	server := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		_, _ = w.Write([]byte(r.Proto))
-	}), &http2.Server{})
-	server := httptest.NewServer(handler)
+	}))
+	server.Config.Protocols = protocols
+	server.Start()
 	defer server.Close()
 
 	target, err := url.Parse(server.URL)

@@ -97,9 +97,14 @@ var h2cTransport = &http2.Transport{
 	// AllowHTTP makes the transport use h2c for http:// URLs, so the dialer
 	// must hand back a plain connection instead of a TLS one. Note that
 	// http2.Transport multiplexes every stream over one connection and does
-	// not consult a proxy - both are deliberate for an XHTTP upstream.
+	// not consult a proxy - both are deliberate for an XHTTP upstream. The
+	// dialer gets the same connect/keepalive bounds as the TLS transport so a
+	// black-holed upstream cannot hold the relay's request goroutine.
 	DialTLSContext: func(ctx context.Context, network, addr string, _ *tls.Config) (net.Conn, error) {
-		return (&net.Dialer{}).DialContext(ctx, network, addr)
+		return (&net.Dialer{
+			Timeout:   dialTimeout,
+			KeepAlive: dialKeepAlive,
+		}).DialContext(ctx, network, addr)
 	},
 }
 
@@ -130,6 +135,13 @@ type FetchOptions struct {
 	// handler forever. Ignored when TimeoutMs > 0, because that already bounds
 	// the whole call.
 	IdleTimeoutMs int
+	// BodyIdleTimeoutMs bounds inactivity while sending the request body. A
+	// client that opens an upload and then stalls would otherwise hold the
+	// request, its upstream connection and both sockets forever: the server's
+	// IdleTimeout only applies between requests, and ReadTimeout is unset.
+	// The timer restarts whenever the body produces bytes and stops once the
+	// body ends. Ignored when TimeoutMs > 0.
+	BodyIdleTimeoutMs int
 	// URL, when set, is used directly instead of parsing rawURL. Callers that
 	// already hold a parsed URL (a cached provider base, or a validated config
 	// target) skip url.Parse on every request. The value is copied, so callers
@@ -161,7 +173,7 @@ type FetchOptions struct {
 // response.Body afterwards, and cancelling on return would truncate every
 // streamed body. So the cancel function is deferred to the body's Close.
 func FetchUpstream(ctx context.Context, rawURL string, opts FetchOptions) (*http.Response, error) {
-	if opts.TimeoutMs <= 0 && opts.HeaderTimeoutMs <= 0 && opts.IdleTimeoutMs <= 0 {
+	if opts.TimeoutMs <= 0 && opts.HeaderTimeoutMs <= 0 && opts.IdleTimeoutMs <= 0 && opts.BodyIdleTimeoutMs <= 0 {
 		return do(ctx, rawURL, opts)
 	}
 
@@ -185,7 +197,29 @@ func FetchUpstream(ctx context.Context, rawURL string, opts FetchOptions) (*http
 		)
 	}
 
+	// The upload timer must cover do itself: a stalled body blocks RoundTrip
+	// before any response exists. It is stopped as soon as do returns,
+	// otherwise it could cut the (streaming) response body.
+	var bodyIdle *bodyIdleTimeoutReader
+	if opts.TimeoutMs <= 0 && opts.BodyIdleTimeoutMs > 0 && opts.Body != nil {
+		bodyIdle = newBodyIdleTimeoutReader(opts.Body, cancel, time.Duration(opts.BodyIdleTimeoutMs)*time.Millisecond)
+		opts.Body = bodyIdle
+	}
+
 	response, err := do(requestCtx, rawURL, opts)
+	if bodyIdle != nil {
+		// Stop first: after do returns the body must not cancel the streaming
+		// response, but a timer that already fired has cancelled it and must be
+		// reported as a timeout rather than as a generic request failure.
+		bodyIdle.Stop()
+		if bodyIdle.Fired() {
+			cancel()
+			if response != nil && response.Body != nil {
+				_ = response.Body.Close()
+			}
+			return nil, fmt.Errorf("%w while sending request body after %dms", ErrUpstreamTimeout, opts.BodyIdleTimeoutMs)
+		}
+	}
 	if headerTimer != nil && !headerTimer.Stop() && ctx.Err() == nil {
 		// The header timer fired (or was firing) while the request was still in
 		// flight. Treat it as an upstream timeout rather than handing back a
@@ -254,6 +288,67 @@ func (b *idleTimeoutBody) Close() error {
 	b.timer.Stop()
 	return b.ReadCloser.Close()
 }
+
+// bodyIdleTimeoutReader cancels the request when the request body stops
+// producing bytes for the configured interval. A stalled upload would
+// otherwise block RoundTrip forever, holding the request goroutine, the
+// upstream connection and both client/upstream sockets.
+type bodyIdleTimeoutReader struct {
+	reader  io.Reader
+	cancel  context.CancelFunc
+	timeout time.Duration
+	timer   *time.Timer
+	fired   atomic.Bool
+}
+
+func newBodyIdleTimeoutReader(reader io.Reader, cancel context.CancelFunc, timeout time.Duration) *bodyIdleTimeoutReader {
+	body := &bodyIdleTimeoutReader{reader: reader, cancel: cancel, timeout: timeout}
+	body.timer = time.AfterFunc(timeout, func() {
+		body.fired.Store(true)
+		cancel()
+		// Cancelling the context makes RoundTrip return, but the transport's
+		// write goroutine may still be blocked inside Read of the client body.
+		// Closing the underlying body is what unblocks it, so a client that
+		// stalls mid-upload actually releases the request.
+		if closer, ok := reader.(io.Closer); ok {
+			_ = closer.Close()
+		}
+	})
+	return body
+}
+
+func (b *bodyIdleTimeoutReader) Read(p []byte) (int, error) {
+	n, err := b.reader.Read(p)
+	if b.fired.Load() {
+		b.timer.Stop()
+		return n, fmt.Errorf("%w after %dms", ErrUpstreamTimeout, b.timeout.Milliseconds())
+	}
+	if n > 0 {
+		b.timer.Reset(b.timeout)
+	}
+	if err != nil {
+		b.timer.Stop()
+	}
+	return n, err
+}
+
+// Stop disarms the timer once the request body is no longer being read.
+func (b *bodyIdleTimeoutReader) Stop() { b.timer.Stop() }
+
+// Close stops the timer and releases the client body. Implementing io.Closer
+// also lets the transport close the body when the request is cancelled.
+func (b *bodyIdleTimeoutReader) Close() error {
+	b.timer.Stop()
+	if closer, ok := b.reader.(io.Closer); ok {
+		return closer.Close()
+	}
+	return nil
+}
+
+// Fired reports whether the body sat idle past the timeout. A fired timer has
+// already cancelled the request context, so the caller must not return the
+// response as success.
+func (b *bodyIdleTimeoutReader) Fired() bool { return b.fired.Load() }
 
 // cancelOnClose releases the timeout context when the body is closed.
 type cancelOnClose struct {

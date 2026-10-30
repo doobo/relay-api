@@ -90,6 +90,16 @@ type Config struct {
 	// long.
 	StreamIdleTimeoutMs int
 
+	// ServerIdleTimeoutMs is how long a keep-alive connection may sit between
+	// requests before it is closed. It only applies between requests, never to
+	// an in-flight SSE stream or /free tunnel, so it can be set even though
+	// those are long-lived.
+	ServerIdleTimeoutMs int
+	// SendTimeoutMs bounds how long a client write may make no progress before
+	// the connection is closed. HTTP/2 enforces it per DATA frame
+	// (HTTP2Config.WriteByteTimeout); HTTP/1.1 arms it per tunnel write.
+	SendTimeoutMs int
+
 	// UpstreamMaxRetries is the number of extra attempts per route after a
 	// retryable upstream failure (network error, timeout, 408, 429, 5xx).
 	// 0 disables retries and keeps the old one-shot failover behaviour.
@@ -156,6 +166,8 @@ func Load() Config {
 		RequestSizeLimitBytes:     int64(intEnv("REQUEST_SIZE_LIMIT_MB", 10)) * 1024 * 1024,
 		RequestTimeoutMs:          intEnv("REQUEST_TIMEOUT_MS", 120_000),
 		StreamIdleTimeoutMs:       intEnv("STREAM_IDLE_TIMEOUT_MS", 60_000),
+		ServerIdleTimeoutMs:       intEnv("SERVER_IDLE_TIMEOUT_MS", 75_000),
+		SendTimeoutMs:             intEnv("SEND_TIMEOUT_MS", 60_000),
 		UpstreamMaxRetries:        nonNegativeIntEnv("UPSTREAM_MAX_RETRIES", 1),
 		UpstreamRetryBaseMs:       intEnv("UPSTREAM_RETRY_BASE_MS", 250),
 		UpstreamRetryMaxMs:        intEnv("UPSTREAM_RETRY_MAX_MS", 4_000),

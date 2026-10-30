@@ -32,6 +32,35 @@ func TestFetchUpstreamHeaderTimeout(t *testing.T) {
 	}
 }
 
+// TestFetchUpstreamBodyIdleTimeout makes sure a client upload that stalls is
+// cancelled instead of pinning the request (and both sockets) forever.
+func TestFetchUpstreamBodyIdleTimeout(t *testing.T) {
+	release := make(chan struct{})
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		<-release
+		_, _ = io.Copy(io.Discard, r.Body)
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer server.Close()
+	defer close(release)
+
+	reader, writer := io.Pipe()
+	defer writer.Close()
+
+	start := time.Now()
+	_, err := FetchUpstream(context.Background(), server.URL, FetchOptions{
+		Method:            http.MethodPost,
+		Body:              reader,
+		BodyIdleTimeoutMs: 50,
+	})
+	if !errors.Is(err, ErrUpstreamTimeout) {
+		t.Fatalf("error = %v, want ErrUpstreamTimeout", err)
+	}
+	if elapsed := time.Since(start); elapsed > 2*time.Second {
+		t.Fatalf("body idle timeout took %v", elapsed)
+	}
+}
+
 // TestFetchUpstreamHeaderTimeoutStopsAtHeaders makes sure the header deadline
 // does not become an overall stream deadline: once headers arrive the body may
 // stream for longer than HeaderTimeoutMs.

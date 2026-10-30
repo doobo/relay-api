@@ -229,20 +229,21 @@ func (h *TunnelRoutes) handle(w http.ResponseWriter, r *http.Request) {
 
 	// A zero stream timeout means "no timeout": a tunnel may legitimately idle
 	// for a long time. A non-zero timeout is an inactivity limit, not a total
-	// duration: HeaderTimeoutMs bounds the wait for response headers and
-	// IdleTimeoutMs restarts on every body byte, so an active multi-hour stream
-	// is never cut just for being old. A client disconnect cancels the request
-	// context too (r.Context()), so a dead tunnel does not keep an upstream
-	// request alive.
+	// duration: HeaderTimeoutMs bounds the wait for response headers,
+	// BodyIdleTimeoutMs bounds a stalled upload and IdleTimeoutMs restarts on
+	// every body byte, so an active multi-hour stream is never cut just for
+	// being old. A client disconnect cancels the request context too
+	// (r.Context()), so a dead tunnel does not keep an upstream request alive.
 	response, err := util.FetchUpstream(r.Context(), "", util.FetchOptions{
-		Method:          clientMethod,
-		Headers:         upstreamHeaders,
-		Body:            body,
-		ContentLength:   contentLength,
-		HeaderTimeoutMs: apiConfig.StreamTimeoutMs,
-		IdleTimeoutMs:   apiConfig.StreamTimeoutMs,
-		URL:             parsedURL,
-		H2C:             apiConfig.UpstreamH2C,
+		Method:            clientMethod,
+		Headers:           upstreamHeaders,
+		Body:              body,
+		ContentLength:     contentLength,
+		HeaderTimeoutMs:   apiConfig.StreamTimeoutMs,
+		BodyIdleTimeoutMs: apiConfig.StreamTimeoutMs,
+		IdleTimeoutMs:     apiConfig.StreamTimeoutMs,
+		URL:               parsedURL,
+		H2C:               apiConfig.UpstreamH2C,
 	})
 	if err != nil {
 		if r.Context().Err() != nil {
@@ -288,7 +289,24 @@ func (h *TunnelRoutes) handle(w http.ResponseWriter, r *http.Request) {
 	// the handler on the single SQLite connection either). A stream reaped by
 	// the configured idle timeout is recorded as 504; a client that leaves
 	// after receiving data keeps the upstream status and gets a note instead.
-	written, copyErr := copyAndFlush(w, response.Body)
+	// HTTP/1.1 has no server-level write timeout here (WriteTimeout would cut
+	// long-lived streams), so arm an idle deadline that every successful write
+	// extends: an active tunnel stays up, a client that stops reading is
+	// dropped after the configured interval. HTTP/2's WriteByteTimeout handles
+	// that direction already.
+	streamWriter := w
+	var clearWriteDeadline func()
+	if r.ProtoMajor == 1 && apiConfig.StreamTimeoutMs > 0 {
+		deadlineWriter := newTunnelWriteDeadlineWriter(w, time.Duration(apiConfig.StreamTimeoutMs)*time.Millisecond)
+		streamWriter = deadlineWriter
+		clearWriteDeadline = deadlineWriter.clear
+	}
+	written, copyErr := copyAndFlush(streamWriter, response.Body)
+	if clearWriteDeadline != nil {
+		// The connection may be reused for the next request; do not let this
+		// response's deadline leak into it.
+		clearWriteDeadline()
+	}
 	forwardTrailers(w, response.Trailer, declaredTrailers)
 	switch {
 	case copyErr == nil:
@@ -395,6 +413,16 @@ func (b *limitedBody) Read(p []byte) (int, error) {
 	return n, err
 }
 
+// Close releases the client body. Implementing io.Closer (rather than leaving
+// callers to wrap the limiter in io.NopCloser) lets the upstream transport close
+// the client stream when the request is cancelled or finishes.
+func (b *limitedBody) Close() error {
+	if closer, ok := b.reader.(io.Closer); ok {
+		return closer.Close()
+	}
+	return nil
+}
+
 // Tunnel copy tuning. The previous loop flushed every 32 KiB, turning a bulk
 // relay into one syscall/DATA frame per chunk; a larger buffer plus a throttle
 // keeps the response prompt while cutting the flush count by an order of
@@ -402,22 +430,29 @@ func (b *limitedBody) Read(p []byte) (int, error) {
 //
 // The buffer is held for the whole response, including while blocked on a read
 // with nothing to relay, so its size multiplies by the number of concurrent
-// tunnels: 3000 idle XHTTP streams at 256 KiB alone would be 750 MiB. 64 KiB
-// still saturates a bulk relay while keeping that worst case near 190 MiB, and
-// GOMEMLIMIT (see README) makes the runtime return pooled buffers under
-// pressure. High-bandwidth long-lived deployments can raise the chunk with
-// TUNNEL_COPY_BUFFER_KB (the README has the memory arithmetic).
+// tunnels. Most XHTTP streams are short exchanges or long-lived trickles that
+// never fill a big chunk, so every response starts with an 8 KiB buffer and is
+// promoted once to the configured large chunk (TUNNEL_COPY_BUFFER_KB, default
+// 64 KiB) only when a read fills the small one. An idle tunnel therefore costs
+// 8 KiB instead of 64 KiB, while a bulk relay still gets large reads; the
+// upgrade is one-way so a mixed stream cannot thrash between buffers.
 const (
+	tunnelSmallBuffer       = 8 * 1024
 	defaultTunnelCopyBuffer = 64 * 1024
 	maxTunnelCopyBuffer     = 1 << 20
 	tunnelFlushBytes        = 32 * 1024
 	tunnelFlushInterval     = 200 * time.Microsecond
 )
 
-// tunnelBufferPool recycles the per-response copy buffer. A high-frequency
-// tunnel would otherwise allocate a chunk for every short request, which is
-// pure GC pressure at packet-mode rates.
-var tunnelBufferPool = newTunnelBufferPool(defaultTunnelCopyBuffer)
+// tunnelBufferPool recycles the large chunk; tunnelSmallBufferPool the chunk
+// every response starts with. Both pools are shared by the 3000-tunnel worst
+// case, so a short request does not allocate at packet-mode rates.
+var (
+	tunnelBufferPool      = newTunnelBufferPool(defaultTunnelCopyBuffer)
+	tunnelSmallBufferPool = newTunnelBufferPool(tunnelSmallBuffer)
+	// tunnelCopyChunk is the large chunk size the current pool hands out.
+	tunnelCopyChunk = defaultTunnelCopyBuffer
+)
 
 // newTunnelBufferPool builds the pool around one chunk size.
 func newTunnelBufferPool(size int) *sync.Pool {
@@ -429,9 +464,9 @@ func newTunnelBufferPool(size int) *sync.Pool {
 	}
 }
 
-// SetTunnelCopyBufferSize replaces the relay's copy chunk size and returns the
-// effective value. Call it once at startup, before serving: it swaps the pool,
-// and mixing chunk sizes would defeat the short-read flush heuristic in
+// SetTunnelCopyBufferSize replaces the relay's large copy chunk size and returns
+// the effective value. Call it once at startup, before serving: it swaps the
+// pool, and mixing chunk sizes would defeat the short-read flush heuristic in
 // copyAndFlush (n < len(buffer)). The size is clamped to [flush threshold,
 // 1 MiB], below which the flush threshold can never be reached and above which
 // the per-tunnel memory cost stops buying syscalls.
@@ -443,6 +478,7 @@ func SetTunnelCopyBufferSize(size int) int {
 		size = maxTunnelCopyBuffer
 	}
 	tunnelBufferPool = newTunnelBufferPool(size)
+	tunnelCopyChunk = size
 	return size
 }
 
@@ -470,9 +506,16 @@ func copyAndFlush(w http.ResponseWriter, src io.Reader) (int64, error) {
 		}
 		return written, nil
 	}
-	bufferPtr := tunnelBufferPool.Get().(*[]byte)
-	defer tunnelBufferPool.Put(bufferPtr)
-	buffer := *bufferPtr
+	smallPtr := tunnelSmallBufferPool.Get().(*[]byte)
+	largePtr := (*[]byte)(nil)
+	defer func() {
+		if largePtr != nil {
+			tunnelBufferPool.Put(largePtr)
+			return
+		}
+		tunnelSmallBufferPool.Put(smallPtr)
+	}()
+	buffer := *smallPtr
 	var (
 		pending int
 		written int64
@@ -481,6 +524,17 @@ func copyAndFlush(w http.ResponseWriter, src io.Reader) (int64, error) {
 	for {
 		n, err := src.Read(buffer)
 		if n > 0 {
+			// A full small read means the source has more queued than the
+			// small chunk: promote once to the configured large chunk, moving
+			// the bytes already read into it. The upgrade is never reversed, so
+			// a mixed stream does not thrash between pool sizes.
+			if largePtr == nil && n == len(buffer) && tunnelCopyChunk > len(buffer) {
+				largePtr = tunnelBufferPool.Get().(*[]byte)
+				buffer = *largePtr
+				copy(buffer, (*smallPtr)[:n])
+				tunnelSmallBufferPool.Put(smallPtr)
+				smallPtr = nil
+			}
 			if _, writeErr := w.Write(buffer[:n]); writeErr != nil {
 				return written, fmt.Errorf("%w: %v", errClientDisconnected, writeErr)
 			}
@@ -501,4 +555,41 @@ func copyAndFlush(w http.ResponseWriter, src io.Reader) (int64, error) {
 			return written, err
 		}
 	}
+}
+
+// tunnelWriteDeadlineWriter extends the client write deadline on every write.
+// Without it an HTTP/1.1 client that stops reading blocks Write forever: the
+// server has no WriteTimeout (it is a total-duration limit and would cut
+// long-lived streams). Extending the deadline per write keeps an active stream
+// alive, while a write that makes no progress for the configured interval fails
+// and closes the tunnel. HTTP/2 does not need this: HTTP2Config.WriteByteTimeout
+// already closes a connection whose writes stop making progress.
+type tunnelWriteDeadlineWriter struct {
+	http.ResponseWriter
+	controller *http.ResponseController
+	timeout    time.Duration
+}
+
+func newTunnelWriteDeadlineWriter(w http.ResponseWriter, timeout time.Duration) *tunnelWriteDeadlineWriter {
+	return &tunnelWriteDeadlineWriter{
+		ResponseWriter: w,
+		controller:     http.NewResponseController(w),
+		timeout:        timeout,
+	}
+}
+
+func (w *tunnelWriteDeadlineWriter) Write(p []byte) (int, error) {
+	_ = w.controller.SetWriteDeadline(time.Now().Add(w.timeout))
+	return w.ResponseWriter.Write(p)
+}
+
+// Flush keeps the wrapper an http.Flusher so copyAndFlush still streams.
+func (w *tunnelWriteDeadlineWriter) Flush() {
+	_ = w.controller.Flush()
+}
+
+// clear removes the deadline so a reused keep-alive connection does not inherit
+// this response's limit.
+func (w *tunnelWriteDeadlineWriter) clear() {
+	_ = w.controller.SetWriteDeadline(time.Time{})
 }
