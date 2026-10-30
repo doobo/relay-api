@@ -63,10 +63,12 @@ func IsPrivateHost(host string) bool {
 	return false
 }
 
-// ValidateUpstreamURL parses and validates an upstream URL for SSRF safety:
-// only http/https to non-private hosts is allowed unless
-// ALLOW_PRIVATE_UPSTREAMS is on.
-func ValidateUpstreamURL(raw string) (*url.URL, error) {
+// ParseUpstreamURL parses an upstream URL and applies the checks that do not
+// depend on the process environment: the scheme must be http/https and the URL
+// must carry a hostname. The result can be cached for the lifetime of a config,
+// unlike the private-host policy below (ALLOW_PRIVATE_UPSTREAMS can be flipped
+// between requests in tests and reloaded by restarting the process).
+func ParseUpstreamURL(raw string) (*url.URL, error) {
 	parsed, err := url.Parse(raw)
 	if err != nil {
 		return nil, fmt.Errorf("invalid URL: %s", raw)
@@ -74,16 +76,35 @@ func ValidateUpstreamURL(raw string) (*url.URL, error) {
 	if parsed.Scheme != "http" && parsed.Scheme != "https" {
 		return nil, fmt.Errorf("blocked URL scheme: %s", parsed.Scheme)
 	}
-	host := parsed.Hostname()
-	if host == "" {
+	if parsed.Hostname() == "" {
 		return nil, fmt.Errorf("URL has no hostname: %s", raw)
 	}
-	if !PrivateUpstreamsAllowed() && IsPrivateHost(host) {
-		return nil, fmt.Errorf(
-			"blocked private/internal host: %s - set ALLOW_PRIVATE_UPSTREAMS=1 on the gateway "+
-				"(and restart it) to allow local/private upstreams such as Ollama or another service on the same box.",
-			host,
-		)
+	return parsed, nil
+}
+
+// CheckUpstreamHost applies the SSRF host policy to an already-parsed URL.
+func CheckUpstreamHost(parsed *url.URL) error {
+	host := parsed.Hostname()
+	if PrivateUpstreamsAllowed() || !IsPrivateHost(host) {
+		return nil
+	}
+	return fmt.Errorf(
+		"blocked private/internal host: %s - set ALLOW_PRIVATE_UPSTREAMS=1 on the gateway "+
+			"(and restart it) to allow local/private upstreams such as Ollama or another service on the same box.",
+		host,
+	)
+}
+
+// ValidateUpstreamURL parses and validates an upstream URL for SSRF safety:
+// only http/https to non-private hosts is allowed unless
+// ALLOW_PRIVATE_UPSTREAMS is on.
+func ValidateUpstreamURL(raw string) (*url.URL, error) {
+	parsed, err := ParseUpstreamURL(raw)
+	if err != nil {
+		return nil, err
+	}
+	if err := CheckUpstreamHost(parsed); err != nil {
+		return nil, err
 	}
 	return parsed, nil
 }

@@ -11,6 +11,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 )
 
 // SecretBox encrypts sensitive columns (provider api_key, api_config api_key)
@@ -23,6 +24,14 @@ const secretPrefix = "enc:v1:"
 // SecretBox holds the 32-byte encryption key.
 type SecretBox struct {
 	key []byte
+
+	// The AEAD is derived once: aes.NewCipher + cipher.NewGCM cost ~600ns and
+	// two allocations, and both Encrypt and Decrypt sit on the relay hot paths
+	// (/free, /open and the admin API). cipher.AEAD methods are safe for
+	// concurrent use, so a single cached instance serves every request.
+	gcmOnce sync.Once
+	gcmAEAD cipher.AEAD
+	gcmErr  error
 }
 
 // NewSecretBox loads the encryption key from SECRET_ENCRYPTION_KEY, or from the
@@ -106,11 +115,15 @@ func (s *SecretBox) IsEncrypted(stored string) bool {
 }
 
 func (s *SecretBox) gcm() (cipher.AEAD, error) {
-	block, err := aes.NewCipher(s.key)
-	if err != nil {
-		return nil, err
-	}
-	return cipher.NewGCM(block)
+	s.gcmOnce.Do(func() {
+		block, err := aes.NewCipher(s.key)
+		if err != nil {
+			s.gcmErr = err
+			return
+		}
+		s.gcmAEAD, s.gcmErr = cipher.NewGCM(block)
+	})
+	return s.gcmAEAD, s.gcmErr
 }
 
 func loadSecretKey() ([]byte, error) {

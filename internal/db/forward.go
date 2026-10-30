@@ -71,9 +71,22 @@ func enabledAPIConfigs() ([]APIConfigRow, map[string]*configRouteIndex, error) {
 	return items, index, nil
 }
 
-// compileAPIConfigTemplates parses each config's headers and request/response
-// template once, when the cache is built, so the forwarder does not decode JSON
-// or compile template paths on every request.
+// apiConfigSecretBox decrypts stored api_config keys while the config cache is
+// built. It stays nil when the process never wires one (unit tests that only
+// exercise the DB package), in which case handlers decrypt per request exactly
+// as before.
+var apiConfigSecretBox *util.SecretBox
+
+// SetAPIConfigSecretBox installs the process-wide secret box used to decrypt
+// cached config keys. Call it once at startup, before serving.
+func SetAPIConfigSecretBox(box *util.SecretBox) {
+	apiConfigSecretBox = box
+}
+
+// compileAPIConfigTemplates parses each config's headers, request/response
+// template, upstream URL and stored API key once, when the cache is built, so
+// the forwarder does not decode JSON, compile template paths, run url.Parse or
+// perform an AES-GCM decryption on every request.
 func compileAPIConfigTemplates(items []APIConfigRow) {
 	for position := range items {
 		config := &items[position]
@@ -89,6 +102,21 @@ func compileAPIConfigTemplates(items []APIConfigRow) {
 		}
 		config.ParsedRequestTemplate = compileJSONTemplate(config.RequestTemplate)
 		config.ParsedResponseTemplate = compileJSONTemplate(config.ResponseTemplate)
+		// The scheme/hostname checks are environment-independent, so caching the
+		// parse is safe; the private-host policy (ALLOW_PRIVATE_UPSTREAMS) is
+		// applied per request by the handler.
+		config.ParsedURL, config.ParsedURLErr = util.ParseUpstreamURL(config.URL)
+		if apiConfigSecretBox != nil && config.APIKey != nil && *config.APIKey != "" {
+			plaintext, err := apiConfigSecretBox.Decrypt(*config.APIKey)
+			if err != nil {
+				// Keep the error so the request still fails exactly like the
+				// per-request decrypt did, instead of silently serving the
+				// config without an Authorization header.
+				config.ParsedKeyErr = err
+			} else {
+				config.ParsedKey = &plaintext
+			}
+		}
 	}
 }
 

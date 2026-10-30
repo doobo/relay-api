@@ -116,6 +116,15 @@ type Config struct {
 	// TunnelUsageSample records one in N successful /free requests; 1 records
 	// every request.
 	TunnelUsageSample int
+	// TunnelCopyBufferKB is the /free relay's copy chunk size in KiB. Each
+	// concurrent tunnel holds one chunk for the whole response, so raising it
+	// trades memory for fewer syscalls; see the README for the arithmetic.
+	TunnelCopyBufferKB int
+	// H2CMaxConcurrentStreams is the per-connection HTTP/2 stream limit
+	// advertised to clients. XHTTP fans one client into many streams; the value
+	// is connection-level SETTINGS, so it applies to new connections only and
+	// needs a restart.
+	H2CMaxConcurrentStreams int
 	// UsageHeaderSnapshots stores request/upstream header JSON on every usage
 	// row. Disabling it saves CPU and keeps usage_logs small.
 	UsageHeaderSnapshots bool
@@ -155,6 +164,8 @@ func Load() Config {
 		UpstreamBreakerCooldownMs: intEnv("UPSTREAM_BREAKER_COOLDOWN_MS", 30_000),
 		AccessLogSkipPrefixes:     splitPrefixes(getenv("ACCESS_LOG_SKIP_PREFIXES", "/free")),
 		TunnelUsageSample:         intEnv("TUNNEL_USAGE_SAMPLE", 10),
+		TunnelCopyBufferKB:        intEnv("TUNNEL_COPY_BUFFER_KB", 64),
+		H2CMaxConcurrentStreams:   intEnv("H2C_MAX_CONCURRENT_STREAMS", 2048),
 		UsageHeaderSnapshots:      boolEnv("USAGE_HEADER_SNAPSHOTS", true),
 		LogRetentionDays:          retentionDays(),
 		LogCleanupTime:            parseCleanupTime(os.Getenv("LOG_CLEANUP_TIME")),

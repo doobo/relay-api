@@ -98,6 +98,9 @@ func main() {
 	if err != nil {
 		fatal("load secret encryption key", "error", err)
 	}
+	// Let the config cache decrypt stored keys once instead of on every /free
+	// and /open request.
+	db.SetAPIConfigSecretBox(secrets)
 
 	limiter := middleware.NewRateLimiter()
 	challenges := util.NewChallengeStore()
@@ -132,6 +135,12 @@ func main() {
 	// API-key auth in front of it - its bodies are piped unread and its per
 	// config limits are enforced inside the handler while streaming.
 	freeMux := http.NewServeMux()
+	// The relay's copy chunk is process-wide (the pool is shared with the SSE
+	// path), so it is installed before the handler serves anything.
+	if size := routes.SetTunnelCopyBufferSize(cfg.TunnelCopyBufferKB * 1024); size != cfg.TunnelCopyBufferKB*1024 {
+		slog.Warn("tunnel copy buffer clamped",
+			"requested_kb", cfg.TunnelCopyBufferKB, "effective_kb", size/1024)
+	}
 	tunnelRoutes := routes.NewTunnelRoutes(secrets)
 	tunnelRoutes.SetUsageSample(cfg.TunnelUsageSample)
 	tunnelRoutes.Register(freeMux, "/free")
@@ -157,11 +166,18 @@ func main() {
 	// per-connection receive windows are widened (the library defaults to 1 MiB
 	// each) to keep a high-BDP cross-region link from being throttled to
 	// window/RTT, and more concurrent streams are allowed per connection
-	// (default 250). No IdleTimeout is set deliberately: SSE streams and the
-	// /free tunnel are long-lived and may sit idle, so idle control stays in the
-	// handlers (STREAM_IDLE_TIMEOUT_MS).
+	// (default 250; H2C_MAX_CONCURRENT_STREAMS, default 2048). This limit is a
+	// connection-level SETTINGS value: it applies to new connections only, so a
+	// change needs a restart, and it is not per api_config. Streams beyond it
+	// are refused (REFUSED_STREAM), which a compliant client retries on another
+	// connection; each accepted stream may hold an upload buffer plus the
+	// relay's copy chunk, so raising it far has a memory cost.
+	//
+	// No IdleTimeout is set deliberately: SSE streams and the /free tunnel are
+	// long-lived and may sit idle, so idle control stays in the handlers
+	// (STREAM_IDLE_TIMEOUT_MS).
 	h2s := &http2.Server{
-		MaxConcurrentStreams:         1000,
+		MaxConcurrentStreams:         uint32(cfg.H2CMaxConcurrentStreams),
 		MaxReadFrameSize:             1 << 20,
 		MaxUploadBufferPerStream:     2 << 20,
 		MaxUploadBufferPerConnection: 8 << 20,

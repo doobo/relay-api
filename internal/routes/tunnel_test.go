@@ -1,11 +1,13 @@
 package routes
 
 import (
+	"bytes"
 	"context"
 	"io"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -146,6 +148,16 @@ func TestTunnelPassthrough(t *testing.T) {
 		if seen.Path != "/base/users/1" || seen.RawQuery != "fields=name" {
 			t.Fatalf("upstream saw path=%q query=%q", seen.Path, seen.RawQuery)
 		}
+		// A second request must not inherit the first one's tail: the cached
+		// upstream URL is shared, so the handler has to work on a copy.
+		recorder = call(t, http.MethodGet, "/free/api/users/2?fields=id", "", nil)
+		if recorder.Code != http.StatusOK {
+			t.Fatalf("status = %d, body = %s", recorder.Code, recorder.Body.String())
+		}
+		seen = capture()
+		if seen.Path != "/base/users/2" || seen.RawQuery != "fields=id" {
+			t.Fatalf("second request saw path=%q query=%q", seen.Path, seen.RawQuery)
+		}
 	})
 
 	t.Run("config on the open route is not served by the tunnel", func(t *testing.T) {
@@ -206,6 +218,120 @@ func TestTunnelBodyLimit(t *testing.T) {
 		harness.handler.ServeHTTP(recorder, request)
 		if recorder.Code != http.StatusOK {
 			t.Fatalf("status = %d, body = %s", recorder.Code, recorder.Body.String())
+		}
+	})
+}
+
+// upstreamFraming is what the upstream saw of the request framing.
+type upstreamFraming struct {
+	contentLength    int64
+	transferEncoding []string
+	lengthHeader     string
+}
+
+// TestTunnelContentLengthPassthrough locks the framing optimisation: a client
+// that declares its body length must reach the upstream with the same
+// Content-Length instead of chunked encoding, in both the uncapped and the
+// capped (default streamMaxBodyMb=8 style) configuration. A client that streams
+// without a length must stay chunked, because the limiter cannot know the
+// length there.
+func TestTunnelContentLengthPassthrough(t *testing.T) {
+	harness := newTunnelHarness(t)
+
+	var (
+		mu   sync.Mutex
+		last upstreamFraming
+	)
+	mock := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		last = upstreamFraming{
+			contentLength:    r.ContentLength,
+			transferEncoding: r.TransferEncoding,
+			lengthHeader:     r.Header.Get("Content-Length"),
+		}
+		mu.Unlock()
+		_, _ = io.Copy(io.Discard, r.Body)
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer mock.Close()
+
+	capture := func() upstreamFraming {
+		mu.Lock()
+		defer mu.Unlock()
+		return last
+	}
+
+	mustConfig(t, db.NewAPIConfig{
+		Name: "uncapped", Method: "POST", URL: mock.URL,
+		StreamTimeoutMs: 15000, StreamMaxBodyMb: 0, Route: "free", Enabled: true,
+	})
+	mustConfig(t, db.NewAPIConfig{
+		Name: "capped", Method: "POST", URL: mock.URL,
+		StreamTimeoutMs: 15000, StreamMaxBodyMb: 8, Route: "free", Enabled: true,
+	})
+
+	for _, name := range []string{"uncapped", "capped"} {
+		t.Run(name+"/declared length reaches the upstream", func(t *testing.T) {
+			body := strings.Repeat("a", 2048)
+			request := httptest.NewRequest(http.MethodPost, "/free/"+name, strings.NewReader(body))
+			recorder := httptest.NewRecorder()
+			harness.handler.ServeHTTP(recorder, request)
+			if recorder.Code != http.StatusOK {
+				t.Fatalf("status = %d, body = %s", recorder.Code, recorder.Body.String())
+			}
+			seen := capture()
+			if seen.contentLength != int64(len(body)) {
+				t.Fatalf("upstream ContentLength = %d, want %d", seen.contentLength, len(body))
+			}
+			if seen.lengthHeader != strconv.Itoa(len(body)) {
+				t.Fatalf("upstream Content-Length header = %q, want %d", seen.lengthHeader, len(body))
+			}
+			if len(seen.transferEncoding) != 0 {
+				t.Fatalf("upstream TransferEncoding = %v, want none", seen.transferEncoding)
+			}
+		})
+	}
+
+	t.Run("unknown length stays chunked", func(t *testing.T) {
+		request := httptest.NewRequest(http.MethodPost, "/free/capped", io.NopCloser(strings.NewReader("streamed")))
+		request.ContentLength = -1
+		recorder := httptest.NewRecorder()
+		harness.handler.ServeHTTP(recorder, request)
+		if recorder.Code != http.StatusOK {
+			t.Fatalf("status = %d, body = %s", recorder.Code, recorder.Body.String())
+		}
+		seen := capture()
+		if seen.contentLength != -1 {
+			t.Fatalf("upstream ContentLength = %d, want -1", seen.contentLength)
+		}
+		if len(seen.transferEncoding) != 1 || seen.transferEncoding[0] != "chunked" {
+			t.Fatalf("upstream TransferEncoding = %v, want [chunked]", seen.transferEncoding)
+		}
+	})
+
+	// The production path: net/http's server-side body reader (not the
+	// httptest request one) must hand the transport exactly the declared bytes,
+	// otherwise a mismatched Content-Length would fail the upstream call.
+	t.Run("real client connection", func(t *testing.T) {
+		proxy := httptest.NewServer(harness.handler)
+		defer proxy.Close()
+
+		body := strings.Repeat("b", 4096)
+		response, err := http.Post(proxy.URL+"/free/capped", "application/octet-stream", strings.NewReader(body))
+		if err != nil {
+			t.Fatalf("post: %v", err)
+		}
+		_, readErr := io.Copy(io.Discard, response.Body)
+		_ = response.Body.Close()
+		if readErr != nil {
+			t.Fatalf("read response: %v", readErr)
+		}
+		if response.StatusCode != http.StatusOK {
+			t.Fatalf("status = %d", response.StatusCode)
+		}
+		seen := capture()
+		if seen.contentLength != int64(len(body)) || seen.lengthHeader != strconv.Itoa(len(body)) {
+			t.Fatalf("upstream saw ContentLength=%d header=%q, want %d", seen.contentLength, seen.lengthHeader, len(body))
 		}
 	})
 }
@@ -554,5 +680,41 @@ func TestTunnelForwardsTrailers(t *testing.T) {
 	}
 	if got := response.Trailer.Get("X-Trailer"); got != "done" {
 		t.Fatalf("trailer = %q, want done", got)
+	}
+}
+
+// TestTunnelCopyBufferSize locks the TUNNEL_COPY_BUFFER_KB plumbing: the chunk
+// is clamped to a sane window and the copy loop still relays a body that spans
+// several chunks.
+func TestTunnelCopyBufferSize(t *testing.T) {
+	t.Cleanup(func() { SetTunnelCopyBufferSize(defaultTunnelCopyBuffer) })
+
+	for _, testCase := range []struct {
+		name string
+		in   int
+		want int
+	}{
+		{"below the flush threshold", 8 * 1024, tunnelFlushBytes},
+		{"default", defaultTunnelCopyBuffer, defaultTunnelCopyBuffer},
+		{"larger", 128 * 1024, 128 * 1024},
+		{"above the cap", 8 << 20, maxTunnelCopyBuffer},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			if got := SetTunnelCopyBufferSize(testCase.in); got != testCase.want {
+				t.Fatalf("effective size = %d, want %d", got, testCase.want)
+			}
+		})
+	}
+
+	// A body spanning several 128 KiB chunks must arrive intact.
+	SetTunnelCopyBufferSize(128 * 1024)
+	payload := bytes.Repeat([]byte("x"), 300*1024)
+	recorder := httptest.NewRecorder()
+	written, err := copyAndFlush(recorder, bytes.NewReader(payload))
+	if err != nil {
+		t.Fatalf("copyAndFlush: %v", err)
+	}
+	if written != int64(len(payload)) || recorder.Body.Len() != len(payload) {
+		t.Fatalf("relayed %d bytes (recorder %d), want %d", written, recorder.Body.Len(), len(payload))
 	}
 }

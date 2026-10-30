@@ -135,6 +135,15 @@ type FetchOptions struct {
 	// target) skip url.Parse on every request. The value is copied, so callers
 	// may reuse theirs.
 	URL *url.URL
+	// ContentLength, when > 0, declares the body length so the upstream sees a
+	// Content-Length instead of Transfer-Encoding: chunked. A relayed client
+	// body already carries its length in Request.ContentLength, but the generic
+	// io.ReadCloser branch would otherwise drop it: HTTP/1.1 then pays a chunked
+	// frame per write, and the HTTP/2 client allocates a full-size body scratch
+	// buffer per in-flight request (see x/net/http2 frameScratchBufferLen) plus
+	// an extra empty END_STREAM DATA frame. Leave it 0 (unknown) whenever the
+	// body length is not guaranteed to match, e.g. a capped/limited reader.
+	ContentLength int64
 	// H2C sends an http:// upstream over cleartext HTTP/2 instead of HTTP/1.1.
 	// Only set it for upstreams known to speak h2c; https:// URLs ignore it.
 	H2C bool
@@ -271,6 +280,12 @@ func do(ctx context.Context, rawURL string, opts FetchOptions) (*http.Response, 
 		if err != nil {
 			return nil, err
 		}
+	}
+	// A declared length turns the body back into a framed request: HTTP/1.1
+	// drops Transfer-Encoding: chunked, HTTP/2 can end the stream on the final
+	// DATA frame.
+	if opts.ContentLength > 0 {
+		request.ContentLength = opts.ContentLength
 	}
 	for key, value := range opts.Headers {
 		request.Header.Set(key, value)

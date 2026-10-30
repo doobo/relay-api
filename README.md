@@ -76,6 +76,8 @@ CGO_ENABLED=0 go build -trimpath -ldflags "-s -w" -o relay-api .
 | `UPSTREAM_BREAKER_COOLDOWN_MS` | `30000` | 熔断持续时间（毫秒），到期后放行一个探测请求 |
 | `ACCESS_LOG_SKIP_PREFIXES` | `/free` | 不写访问日志的路径前缀（逗号分隔）；请求 ID 仍会生成，设为空可记录所有请求 |
 | `TUNNEL_USAGE_SAMPLE` | `10` | `/free` 成功请求写入用量日志的采样率，`N` 表示每 N 条记录 1 条；错误请求始终记录 |
+| `TUNNEL_COPY_BUFFER_KB` | `64` | `/free` 转发时每响应占用的拷贝块大小（KiB，会被夹在 32 KiB~1 MiB 之间）。乘以并发隧道数即为常驻内存；高带宽长连接部署可调到 `128`，配合 `GOMEMLIMIT` 使用 |
+| `H2C_MAX_CONCURRENT_STREAMS` | `2048` | 每条 h2c/h2 连接向客户端公告的最大并发流数（连接级 SETTINGS，仅对新连接生效，修改需重启）。它不是按 API Config 配置的：一条连接上所有配置共用同一上限；超限的流会被 `REFUSED_STREAM`，由客户端重试，且每条流都可能占用上传缓冲与拷贝块 |
 | `USAGE_HEADER_SNAPSHOTS` | `true` | 是否在用量日志中保存请求/上游 header 快照；设为 `false` 可减少 CPU 开销与数据库体积 |
 | `LOG_RETENTION_DAYS` | `7` | 用量/审计日志保留天数；`0` 表示永久保留。周/月配额不依赖日志（见“配额与日志保留”），可以放心设短 |
 | `LOG_CLEANUP_TIME` | `03:00` | 每日自动清理的本地时间（`HH:MM`）；进程启动时也会补跑一次，避免频繁重启错过清理 |
@@ -245,7 +247,8 @@ make clean-dist                       # 删除 dist/
   ```
 
   默认的 1024 软上限大约只能撑 500 条并发隧道，达到上限后 `accept()` 报 `EMFILE`，**包括 `/v1` 在内的所有新请求都会被拒绝**。
-- **单条隧道的内存**：`copyAndFlush` 的 64 KiB 缓冲在整条响应期间都会占住（包括阻塞在读取、暂时没有数据时），所以内存约等于 `64 KiB × 并发隧道数`。3000 条并发隧道约 190 MiB，另有每条隧道的 goroutine 栈与 http2 流控缓冲。
+- **单条隧道的内存**：`copyAndFlush` 的拷贝块（`TUNNEL_COPY_BUFFER_KB`，默认 64 KiB）在整条响应期间都会占住（包括阻塞在读取、暂时没有数据时），所以内存约等于 `块大小 × 并发隧道数`：64 KiB 时 3000 条并发隧道约 190 MiB，调到 128 KiB 则约 375 MiB，另有每条隧道的 goroutine 栈与 http2 流控缓冲。块大小会与 `H2C_MAX_CONCURRENT_STREAMS` 相乘，两者一起调大前先按并发数估算。
+- **HTTP/2 并发流**：`H2C_MAX_CONCURRENT_STREAMS`（默认 2048）是**连接级** SETTINGS，不是按 API Config 配置的；它只影响新连接（改完需重启），超限的流返回 `REFUSED_STREAM` 由客户端重试。另外端到端并发还受上游那一跳公告的流数上限约束，一味调大入口上限可能只是把排队位置前移。
 - **堆上限**：建议给 Go 设置软上限 `GOMEMLIMIT`（约为容器内存的 60%~75%），否则运行时可能要等到约 2 倍活跃堆才 GC，突发缓冲很容易把内存顶爆：
 
   ```bash

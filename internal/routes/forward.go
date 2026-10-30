@@ -152,7 +152,7 @@ func (h *ForwardRoutes) handle(w http.ResponseWriter, r *http.Request) {
 	upstreamHeaders["x-request-id"] = requestID
 
 	if apiConfig.APIKey != nil && *apiConfig.APIKey != "" {
-		plaintext, err := h.secrets.Decrypt(*apiConfig.APIKey)
+		plaintext, err := configAPIKey(h.secrets, apiConfig)
 		if err != nil {
 			internalError(w, "decrypt api config key", err)
 			return
@@ -162,7 +162,7 @@ func (h *ForwardRoutes) handle(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	parsedURL, err := util.ValidateUpstreamURL(apiConfig.URL)
+	parsedURL, err := configUpstreamURL(apiConfig)
 	if err != nil {
 		invalidRequest(w, err.Error())
 		return

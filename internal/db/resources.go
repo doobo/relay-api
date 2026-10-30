@@ -4,6 +4,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"errors"
+	"net/url"
 	"sync"
 	"time"
 
@@ -686,6 +687,23 @@ type APIConfigRow struct {
 	ParsedHeaders          map[string]*util.Template `json:"-"`
 	ParsedRequestTemplate  *util.Template            `json:"-"`
 	ParsedResponseTemplate *util.Template            `json:"-"`
+
+	// ParsedURL and ParsedKey are the per-config work the relay would otherwise
+	// redo on every request: url.Parse + scheme checks, and one AES-GCM
+	// decryption of the stored key. They are filled in by
+	// compileAPIConfigTemplates and are never serialised (the admin API maps a
+	// config to a DTO anyway).
+	//
+	// ParsedURL is nil when the raw value did not parse (ParsedURLErr then holds
+	// the error) or when this row was not loaded through the cache. Callers must
+	// clone it before adding a path/query, and must still run the
+	// ALLOW_PRIVATE_UPSTREAMS check, which is deliberately not cached.
+	ParsedURL    *url.URL `json:"-"`
+	ParsedURLErr error    `json:"-"`
+	// ParsedKey is the decrypted API key; nil means "decrypt on demand" and
+	// ParsedKeyErr is the cached decryption failure to report instead.
+	ParsedKey    *string `json:"-"`
+	ParsedKeyErr error   `json:"-"`
 }
 
 const apiConfigColumns = `id, name, description, method, url, headers, request_template, response_template,

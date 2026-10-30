@@ -163,9 +163,10 @@ func (h *TunnelRoutes) handle(w http.ResponseWriter, r *http.Request) {
 	upstreamHeaders["accept-encoding"] = "identity"
 	upstreamHeaders["x-request-id"] = requestID
 
-	// Stored config keys are encrypted at rest; upstream needs plaintext.
+	// Stored config keys are encrypted at rest; upstream needs plaintext. The
+	// cache decrypts them once when the config set loads (see configAPIKey).
 	if apiConfig.APIKey != nil && *apiConfig.APIKey != "" {
-		plaintext, err := h.secrets.Decrypt(*apiConfig.APIKey)
+		plaintext, err := configAPIKey(h.secrets, apiConfig)
 		if err != nil {
 			internalError(w, "decrypt api config key", err)
 			return
@@ -175,7 +176,7 @@ func (h *TunnelRoutes) handle(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	parsedURL, err := util.ValidateUpstreamURL(apiConfig.URL)
+	parsedURL, err := configUpstreamURL(apiConfig)
 	if err != nil {
 		invalidRequest(w, err.Error())
 		return
@@ -197,8 +198,9 @@ func (h *TunnelRoutes) handle(w http.ResponseWriter, r *http.Request) {
 	}
 	hasBody := clientMethod != http.MethodGet && clientMethod != http.MethodHead
 	var (
-		body    io.Reader
-		limited *limitedBody
+		body          io.Reader
+		contentLength int64
+		limited       *limitedBody
 	)
 	if hasBody && r.Body != nil {
 		// Fast reject when the declared size already exceeds the cap.
@@ -207,6 +209,15 @@ func (h *TunnelRoutes) handle(w http.ResponseWriter, r *http.Request) {
 			record(http.StatusBadRequest, &message)
 			writeTooLarge(w, apiConfig.StreamMaxBodyMb)
 			return
+		}
+		// Forward the client's declared length so the upstream receives a
+		// Content-Length instead of chunked framing. This applies to the capped
+		// body too: a declaration over the cap was just rejected, so the bytes
+		// the limiter will see are exactly the declared ones. A client that
+		// streams without a length (ContentLength < 0) keeps chunked framing
+		// upstream, because the limiter makes the length unknowable there.
+		if r.ContentLength > 0 {
+			contentLength = r.ContentLength
 		}
 		if maxBodyBytes > 0 {
 			limited = &limitedBody{reader: r.Body, limit: maxBodyBytes}
@@ -227,6 +238,7 @@ func (h *TunnelRoutes) handle(w http.ResponseWriter, r *http.Request) {
 		Method:          clientMethod,
 		Headers:         upstreamHeaders,
 		Body:            body,
+		ContentLength:   contentLength,
 		HeaderTimeoutMs: apiConfig.StreamTimeoutMs,
 		IdleTimeoutMs:   apiConfig.StreamTimeoutMs,
 		URL:             parsedURL,
@@ -393,21 +405,45 @@ func (b *limitedBody) Read(p []byte) (int, error) {
 // tunnels: 3000 idle XHTTP streams at 256 KiB alone would be 750 MiB. 64 KiB
 // still saturates a bulk relay while keeping that worst case near 190 MiB, and
 // GOMEMLIMIT (see README) makes the runtime return pooled buffers under
-// pressure.
+// pressure. High-bandwidth long-lived deployments can raise the chunk with
+// TUNNEL_COPY_BUFFER_KB (the README has the memory arithmetic).
 const (
-	tunnelCopyBuffer    = 64 * 1024
-	tunnelFlushBytes    = 32 * 1024
-	tunnelFlushInterval = 200 * time.Microsecond
+	defaultTunnelCopyBuffer = 64 * 1024
+	maxTunnelCopyBuffer     = 1 << 20
+	tunnelFlushBytes        = 32 * 1024
+	tunnelFlushInterval     = 200 * time.Microsecond
 )
 
 // tunnelBufferPool recycles the per-response copy buffer. A high-frequency
-// tunnel would otherwise allocate 256 KiB for every short request, which is
+// tunnel would otherwise allocate a chunk for every short request, which is
 // pure GC pressure at packet-mode rates.
-var tunnelBufferPool = sync.Pool{
-	New: func() any {
-		buffer := make([]byte, tunnelCopyBuffer)
-		return &buffer
-	},
+var tunnelBufferPool = newTunnelBufferPool(defaultTunnelCopyBuffer)
+
+// newTunnelBufferPool builds the pool around one chunk size.
+func newTunnelBufferPool(size int) *sync.Pool {
+	return &sync.Pool{
+		New: func() any {
+			buffer := make([]byte, size)
+			return &buffer
+		},
+	}
+}
+
+// SetTunnelCopyBufferSize replaces the relay's copy chunk size and returns the
+// effective value. Call it once at startup, before serving: it swaps the pool,
+// and mixing chunk sizes would defeat the short-read flush heuristic in
+// copyAndFlush (n < len(buffer)). The size is clamped to [flush threshold,
+// 1 MiB], below which the flush threshold can never be reached and above which
+// the per-tunnel memory cost stops buying syscalls.
+func SetTunnelCopyBufferSize(size int) int {
+	switch {
+	case size < tunnelFlushBytes:
+		size = tunnelFlushBytes
+	case size > maxTunnelCopyBuffer:
+		size = maxTunnelCopyBuffer
+	}
+	tunnelBufferPool = newTunnelBufferPool(size)
+	return size
 }
 
 // errClientDisconnected marks a tunnel copy that failed writing to the client
