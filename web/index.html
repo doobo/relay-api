@@ -647,21 +647,29 @@
     </div>
     <form id="modelEditForm" class="dialog-form" data-id="" data-mode="create">
       <div class="dialog-body">
-        <label class="field">
-          <span>Alias</span>
-          <input name="name" placeholder="e.g. gpt" required>
-        </label>
-        <label class="field">
-          <span>Provider</span>
-          <input name="providerSearch" placeholder="search by name" autocomplete="off" list="providerEditOptions">
-        </label>
-        <datalist id="providerEditOptions"></datalist>
-        <input type="hidden" name="providerId">
-        <label class="field">
-          <span>Upstream model</span>
-          <input name="upstreamModel" placeholder="e.g. gpt-5" required>
-        </label>
-        <p class="hint">Start typing a provider name to filter the list; pick one from the suggestions. Aliases must be unique.</p>
+        <fieldset>
+          <legend>Model</legend>
+          <label class="field">
+            <span>Alias</span>
+            <input name="name" placeholder="e.g. gpt" required>
+          </label>
+          <label class="field">
+            <span>Upstream model</span>
+            <input name="upstreamModel" placeholder="e.g. gpt-5" required>
+          </label>
+        </fieldset>
+
+        <fieldset>
+          <legend>Provider</legend>
+          <label class="field">
+            <span>Provider</span>
+            <input name="providerSearch" placeholder="search by name" autocomplete="off" list="providerEditOptions">
+          </label>
+          <datalist id="providerEditOptions"></datalist>
+          <input type="hidden" name="providerId">
+          <p class="hint">Start typing a provider name to filter the list; pick one from the suggestions. Aliases must be unique.</p>
+        </fieldset>
+
         <label class="check-row"><input type="checkbox" name="enabled"> enabled</label>
       </div>
       <div class="dialog-actions">
