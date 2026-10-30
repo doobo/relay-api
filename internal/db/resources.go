@@ -674,6 +674,7 @@ type APIConfigRow struct {
 	TimeoutMs        int
 	StreamTimeoutMs  int
 	StreamMaxBodyMb  int
+	UpstreamH2C      bool
 	Route            string
 	Enabled          bool
 	CreatedAt        int64
@@ -688,7 +689,7 @@ type APIConfigRow struct {
 }
 
 const apiConfigColumns = `id, name, description, method, url, headers, request_template, response_template,
-	api_key, timeout_ms, stream_timeout_ms, stream_max_body_mb, route, enabled, created_at, updated_at`
+	api_key, timeout_ms, stream_timeout_ms, stream_max_body_mb, upstream_h2c, route, enabled, created_at, updated_at`
 
 func scanAPIConfig(row interface{ Scan(...any) error }) (*APIConfigRow, error) {
 	var (
@@ -699,11 +700,12 @@ func scanAPIConfig(row interface{ Scan(...any) error }) (*APIConfigRow, error) {
 		responseTpl sql.NullString
 		apiKey      sql.NullString
 		route       sql.NullString
+		upstreamH2C int
 		enabled     int
 	)
 	if err := row.Scan(
 		&config.ID, &config.Name, &description, &config.Method, &config.URL, &headers, &requestTpl, &responseTpl,
-		&apiKey, &config.TimeoutMs, &config.StreamTimeoutMs, &config.StreamMaxBodyMb, &route, &enabled,
+		&apiKey, &config.TimeoutMs, &config.StreamTimeoutMs, &config.StreamMaxBodyMb, &upstreamH2C, &route, &enabled,
 		&config.CreatedAt, &config.UpdatedAt,
 	); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
@@ -726,6 +728,7 @@ func scanAPIConfig(row interface{ Scan(...any) error }) (*APIConfigRow, error) {
 	if apiKey.Valid {
 		config.APIKey = &apiKey.String
 	}
+	config.UpstreamH2C = upstreamH2C != 0
 	config.Route = route.String
 	if config.Route == "" {
 		config.Route = "open"
@@ -770,6 +773,7 @@ type NewAPIConfig struct {
 	TimeoutMs        int
 	StreamTimeoutMs  int
 	StreamMaxBodyMb  int
+	UpstreamH2C      bool
 	Route            string
 	Enabled          bool
 }
@@ -779,11 +783,12 @@ func CreateAPIConfig(input NewAPIConfig) (*APIConfigRow, error) {
 	now := time.Now().UnixMilli()
 	result, err := Get().Exec(
 		`INSERT INTO api_configs (name, description, method, url, headers, request_template, response_template,
-			api_key, timeout_ms, stream_timeout_ms, stream_max_body_mb, route, enabled, created_at, updated_at)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+			api_key, timeout_ms, stream_timeout_ms, stream_max_body_mb, upstream_h2c, route, enabled, created_at, updated_at)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		input.Name, nullString(input.Description), input.Method, input.URL, nullString(input.Headers),
 		nullString(input.RequestTemplate), nullString(input.ResponseTemplate), nullString(input.APIKey),
-		input.TimeoutMs, input.StreamTimeoutMs, input.StreamMaxBodyMb, input.Route, boolToInt(input.Enabled), now, now,
+		input.TimeoutMs, input.StreamTimeoutMs, input.StreamMaxBodyMb, boolToInt(input.UpstreamH2C),
+		input.Route, boolToInt(input.Enabled), now, now,
 	)
 	if err != nil {
 		return nil, err
@@ -808,6 +813,7 @@ type APIConfigPatch struct {
 	TimeoutMs        *int
 	StreamTimeoutMs  *int
 	StreamMaxBodyMb  *int
+	UpstreamH2C      *bool
 	Route            *string
 	Enabled          *bool
 	APIKeySet        bool
@@ -836,6 +842,10 @@ func UpdateAPIConfig(id int64, patch APIConfigPatch) (*APIConfigRow, error) {
 	if patch.Enabled != nil {
 		enabled = *patch.Enabled
 	}
+	upstreamH2C := existing.UpstreamH2C
+	if patch.UpstreamH2C != nil {
+		upstreamH2C = *patch.UpstreamH2C
+	}
 	apiKey := existing.APIKey
 	if patch.APIKeySet {
 		apiKey = patch.APIKey
@@ -843,7 +853,7 @@ func UpdateAPIConfig(id int64, patch APIConfigPatch) (*APIConfigRow, error) {
 	_, err = Get().Exec(
 		`UPDATE api_configs SET name = ?, description = ?, method = ?, url = ?, headers = ?,
 			request_template = ?, response_template = ?, api_key = ?, timeout_ms = ?,
-			stream_timeout_ms = ?, stream_max_body_mb = ?, route = ?, enabled = ?, updated_at = ? WHERE id = ?`,
+			stream_timeout_ms = ?, stream_max_body_mb = ?, upstream_h2c = ?, route = ?, enabled = ?, updated_at = ? WHERE id = ?`,
 		firstString(patch.Name, existing.Name),
 		nullString(setString(patch.Description, existing.Description)),
 		firstString(patch.Method, existing.Method),
@@ -855,6 +865,7 @@ func UpdateAPIConfig(id int64, patch APIConfigPatch) (*APIConfigRow, error) {
 		setInt(patch.TimeoutMs, existing.TimeoutMs),
 		setInt(patch.StreamTimeoutMs, existing.StreamTimeoutMs),
 		setInt(patch.StreamMaxBodyMb, existing.StreamMaxBodyMb),
+		boolToInt(upstreamH2C),
 		firstString(patch.Route, existing.Route),
 		boolToInt(enabled),
 		time.Now().UnixMilli(),

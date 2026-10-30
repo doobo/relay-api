@@ -36,6 +36,10 @@ func APIKeyAuth(limiter *RateLimiter) func(http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			fullKey := extractBearer(r.Header.Get("Authorization"))
 			if fullKey == "" {
+				// Anthropic-native clients send the key in x-api-key.
+				fullKey = strings.TrimSpace(r.Header.Get("x-api-key"))
+			}
+			if fullKey == "" {
 				unauthorizedKey(w, "Missing or invalid API key")
 				return
 			}

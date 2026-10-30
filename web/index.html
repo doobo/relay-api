@@ -508,6 +508,7 @@
         </select>
         <input name="streamTimeoutMs" type="number" min="0" placeholder="stream idle timeout ms on /free (blank = 300000 = 5 min; 0 = no timeout)">
         <input name="streamMaxBodyMb" type="number" min="0" placeholder="stream body limit MB on /free (blank = 8; 0 = unlimited)">
+        <label class="check-row"><input type="checkbox" name="upstreamH2C"> upstream h2c (cleartext HTTP/2 for http:// URLs; only if the upstream supports it)</label>
         <input name="apiKey" placeholder="upstream key (optional)" autocomplete="off">
         <input name="headers" placeholder='{"Authorization":"Bearer ..."} (JSON, optional)'>
         <input name="requestTemplate" placeholder='{"city":"{{body.city}}"} (JSON, optional)'>

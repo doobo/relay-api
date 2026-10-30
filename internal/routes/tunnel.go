@@ -230,6 +230,7 @@ func (h *TunnelRoutes) handle(w http.ResponseWriter, r *http.Request) {
 		HeaderTimeoutMs: apiConfig.StreamTimeoutMs,
 		IdleTimeoutMs:   apiConfig.StreamTimeoutMs,
 		URL:             parsedURL,
+		H2C:             apiConfig.UpstreamH2C,
 	})
 	if err != nil {
 		if r.Context().Err() != nil {

@@ -81,7 +81,6 @@ CGO_ENABLED=0 go build -trimpath -ldflags "-s -w" -o relay-api .
 | `LOG_CLEANUP_TIME` | `03:00` | 每日自动清理的本地时间（`HH:MM`）；进程启动时也会补跑一次，避免频繁重启错过清理 |
 | `SECRET_ENCRYPTION_KEY` | 空 | 32 字节 base64 密钥，优先级高于密钥文件；`openssl rand -base64 32` 可生成 |
 | `SECRET_KEY_FILE` | `data/.secret-key` | 密钥文件路径；文件不存在时自动生成（权限 `0600`） |
-| `UPSTREAM_H2C` | 空 | 设为 `1`/`true`/`yes`/`on` 时，明文 `http://` 上游改用 h2c（明文 HTTP/2）；默认关闭，避免不支持 h2c 的上游被拒绝 |
 
 示例：
 

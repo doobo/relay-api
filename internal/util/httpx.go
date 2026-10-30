@@ -10,7 +10,6 @@ import (
 	"net"
 	"net/http"
 	"net/url"
-	"os"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -50,8 +49,8 @@ const (
 	upstreamHTTP2PingWait = 15 * time.Second
 )
 
-// httpsTransport serves TLS upstreams (and plaintext HTTP/1.1 upstreams while
-// h2c is disabled). ForceAttemptHTTP2 lets https endpoints negotiate HTTP/2.
+// httpsTransport serves https upstreams and plaintext http upstreams over
+// HTTP/1.1. ForceAttemptHTTP2 lets https endpoints negotiate HTTP/2.
 //
 // A custom TLSClientConfig (the session cache) and DialContext disable the
 // standard library's implicit HTTP/2 setup, so ForceAttemptHTTP2 has to stay
@@ -84,59 +83,32 @@ var httpsTransport = &http.Transport{
 	},
 }
 
-// h2cTransport serves cleartext HTTP/2 upstreams. It is nil unless
-// UPSTREAM_H2C is set, because a plain HTTP/1.1 upstream (most APIs, and any
-// server without a cleartext HTTP/2 listener) rejects an h2c preface.
-var h2cTransport = newH2CTransport()
-
-// newH2CTransport returns an h2c-capable round tripper when UPSTREAM_H2C is
-// truthy, otherwise nil so plaintext upstreams keep their HTTP/1.1 behaviour.
-func newH2CTransport() http.RoundTripper {
-	if !upstreamH2CEnabled() {
-		return nil
-	}
-	return &http2.Transport{
-		AllowHTTP: true,
-		// Match the TLS transport's frame size and silence detection so an
-		// h2c upstream gets the same throughput and dead-connection handling.
-		MaxReadFrameSize: upstreamMaxReadFrameSize,
-		ReadIdleTimeout:  upstreamHTTP2SendPing,
-		PingTimeout:      upstreamHTTP2PingWait,
-		// AllowHTTP makes the transport use h2c for http:// URLs, so the dialer
-		// must hand back a plain connection instead of a TLS one. Note that
-		// http2.Transport multiplexes every stream over one connection and does
-		// not consult a proxy - both are deliberate for an XHTTP upstream.
-		DialTLSContext: func(ctx context.Context, network, addr string, _ *tls.Config) (net.Conn, error) {
-			return (&net.Dialer{}).DialContext(ctx, network, addr)
-		},
-	}
-}
-
-// upstreamH2CEnabled reports whether UPSTREAM_H2C opts plaintext upstreams into
-// cleartext HTTP/2, accepting the usual truthy spellings.
-func upstreamH2CEnabled() bool {
-	switch strings.ToLower(strings.TrimSpace(os.Getenv("UPSTREAM_H2C"))) {
-	case "1", "true", "yes", "on":
-		return true
-	default:
-		return false
-	}
-}
-
-// transportRouter picks a transport per request scheme, so an https upstream
-// keeps its TLS + HTTP/2 handling while a plaintext one can opt into h2c.
-type transportRouter struct{}
-
-func (transportRouter) RoundTrip(request *http.Request) (*http.Response, error) {
-	if h2cTransport != nil && request.URL.Scheme == "http" {
-		return h2cTransport.RoundTrip(request)
-	}
-	return httpsTransport.RoundTrip(request)
+// h2cTransport serves cleartext HTTP/2 upstreams. It is used only by requests
+// whose config sets FetchOptions.H2C, because a plain HTTP/1.1 upstream (most
+// APIs, and any server without a cleartext HTTP/2 listener) rejects an h2c
+// preface.
+var h2cTransport = &http2.Transport{
+	AllowHTTP: true,
+	// Match the TLS transport's frame size and silence detection so an h2c
+	// upstream gets the same throughput and dead-connection handling.
+	MaxReadFrameSize: upstreamMaxReadFrameSize,
+	ReadIdleTimeout:  upstreamHTTP2SendPing,
+	PingTimeout:      upstreamHTTP2PingWait,
+	// AllowHTTP makes the transport use h2c for http:// URLs, so the dialer
+	// must hand back a plain connection instead of a TLS one. Note that
+	// http2.Transport multiplexes every stream over one connection and does
+	// not consult a proxy - both are deliberate for an XHTTP upstream.
+	DialTLSContext: func(ctx context.Context, network, addr string, _ *tls.Config) (net.Conn, error) {
+		return (&net.Dialer{}).DialContext(ctx, network, addr)
+	},
 }
 
 // httpClient has no global timeout: per-call timeouts are applied via context,
 // and streaming calls deliberately run without one.
-var httpClient = &http.Client{Transport: transportRouter{}}
+var httpClient = &http.Client{Transport: httpsTransport}
+
+// h2cClient sends cleartext HTTP/2 for http:// upstreams that opt in.
+var h2cClient = &http.Client{Transport: h2cTransport}
 
 // FetchOptions describes one upstream request.
 type FetchOptions struct {
@@ -163,6 +135,9 @@ type FetchOptions struct {
 	// target) skip url.Parse on every request. The value is copied, so callers
 	// may reuse theirs.
 	URL *url.URL
+	// H2C sends an http:// upstream over cleartext HTTP/2 instead of HTTP/1.1.
+	// Only set it for upstreams known to speak h2c; https:// URLs ignore it.
+	H2C bool
 }
 
 // FetchUpstream performs an upstream request. timeoutMs <= 0 disables the
@@ -299,6 +274,9 @@ func do(ctx context.Context, rawURL string, opts FetchOptions) (*http.Response, 
 	}
 	for key, value := range opts.Headers {
 		request.Header.Set(key, value)
+	}
+	if opts.H2C && request.URL.Scheme == "http" {
+		return h2cClient.Do(request)
 	}
 	return httpClient.Do(request)
 }

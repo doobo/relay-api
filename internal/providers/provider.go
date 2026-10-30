@@ -146,7 +146,7 @@ func randomSuffix() string {
 func New(cfg Config) Provider {
 	switch cfg.Type {
 	case "anthropic":
-		return &Anthropic{OpenAI: OpenAI{cfg: cfg}}
+		return NewAnthropic(cfg)
 	case "openai-responses", "responses":
 		return &Responses{OpenAI: OpenAI{cfg: cfg}}
 	default:

@@ -120,6 +120,7 @@ function openConfigDialog(mode, cfg) {
     form.elements.route.value = cfg.route === "free" ? "free" : "open";
     form.elements.streamTimeoutMs.value = cfg.stream_timeout_ms ? String(cfg.stream_timeout_ms) : "";
     form.elements.streamMaxBodyMb.value = cfg.stream_max_body_mb ? String(cfg.stream_max_body_mb) : "";
+    form.elements.upstreamH2C.checked = Boolean(cfg.upstream_h2c);
     setMethodValue(form.elements.method, form.elements.customMethod, cfg.method);
     form.elements.apiKey.value = "";
     form.elements.apiKey.placeholder = cfg.has_api_key
@@ -177,6 +178,7 @@ export function initConfigs() {
       url: form.elements.url.value,
       method: getMethodValue(form.elements.method, form.elements.customMethod) || "POST",
       route: form.elements.route.value,
+      upstreamH2c: form.elements.upstreamH2C.checked,
       enabled: form.elements.enabled.checked,
     };
     // /free tunnel limits: blank leaves the field out so the server applies its

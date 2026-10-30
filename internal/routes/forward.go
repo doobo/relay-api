@@ -209,6 +209,7 @@ func (h *ForwardRoutes) handle(w http.ResponseWriter, r *http.Request) {
 		Body:      requestBody,
 		TimeoutMs: timeoutMs,
 		URL:       parsedURL,
+		H2C:       apiConfig.UpstreamH2C,
 	})
 	if err != nil {
 		message := err.Error()

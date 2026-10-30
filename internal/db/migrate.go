@@ -86,6 +86,8 @@ CREATE TABLE IF NOT EXISTS api_configs (
      DefaultStreamTimeoutMs / DefaultStreamMaxBodyMb in resources.go. */
   stream_timeout_ms INTEGER NOT NULL DEFAULT 300000,
   stream_max_body_mb INTEGER NOT NULL DEFAULT 8,
+  /* Opt-in: send http:// upstream requests as cleartext HTTP/2 (h2c). */
+  upstream_h2c INTEGER NOT NULL DEFAULT 0,
   /* Mount point: 'open' (API key required) or 'free' (public). */
   route TEXT DEFAULT 'open',
   enabled INTEGER DEFAULT 1,
@@ -234,6 +236,10 @@ func Migrate(db *sql.DB) error {
 			return err
 		}
 		if err := ensureColumn(tx, "api_configs", "stream_max_body_mb", "INTEGER NOT NULL DEFAULT 8"); err != nil {
+			return err
+		}
+		// Added with the per-config h2c upstream option (default off).
+		if err := ensureColumn(tx, "api_configs", "upstream_h2c", "INTEGER NOT NULL DEFAULT 0"); err != nil {
 			return err
 		}
 		// Added with account roles; pre-existing accounts were full admins.

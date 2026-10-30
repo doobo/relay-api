@@ -39,6 +39,7 @@ func (g *Gateway) Register(mux *http.ServeMux) {
 	mux.HandleFunc("/v1/models", g.models)
 	mux.HandleFunc("/v1/chat/completions", g.chat)
 	mux.HandleFunc("/v1/responses", g.responses)
+	mux.HandleFunc("/v1/messages", g.messages)
 }
 
 // models lists enabled model aliases in OpenAI format.

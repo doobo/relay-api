@@ -905,6 +905,7 @@ type apiConfigDTO struct {
 	TimeoutMs        int            `json:"timeout_ms"`
 	StreamTimeoutMs  int            `json:"stream_timeout_ms"`
 	StreamMaxBodyMb  int            `json:"stream_max_body_mb"`
+	UpstreamH2C      bool           `json:"upstream_h2c"`
 	Route            string         `json:"route"`
 	Enabled          int            `json:"enabled"`
 	CreatedAt        int64          `json:"created_at"`
@@ -928,6 +929,7 @@ func (h *AdminResources) configDTO(config db.APIConfigRow, stats configStatsDTO)
 		TimeoutMs:        config.TimeoutMs,
 		StreamTimeoutMs:  config.StreamTimeoutMs,
 		StreamMaxBodyMb:  config.StreamMaxBodyMb,
+		UpstreamH2C:      config.UpstreamH2C,
 		Route:            config.Route,
 		Enabled:          boolInt(config.Enabled),
 		CreatedAt:        config.CreatedAt,
@@ -1001,6 +1003,7 @@ func (h *AdminResources) createAPIConfig(w http.ResponseWriter, r *http.Request)
 		TimeoutMs        *int            `json:"timeoutMs"`
 		StreamTimeoutMs  *int            `json:"streamTimeoutMs"`
 		StreamMaxBodyMb  *int            `json:"streamMaxBodyMb"`
+		UpstreamH2C      *bool           `json:"upstreamH2c"`
 		Route            *string         `json:"route"`
 		Enabled          *bool           `json:"enabled"`
 	}
@@ -1048,6 +1051,10 @@ func (h *AdminResources) createAPIConfig(w http.ResponseWriter, r *http.Request)
 	if body.Enabled != nil {
 		enabled = *body.Enabled
 	}
+	upstreamH2C := false
+	if body.UpstreamH2C != nil {
+		upstreamH2C = *body.UpstreamH2C
+	}
 	config, err := db.CreateAPIConfig(db.NewAPIConfig{
 		Name:             body.Name,
 		Description:      body.Description,
@@ -1060,6 +1067,7 @@ func (h *AdminResources) createAPIConfig(w http.ResponseWriter, r *http.Request)
 		TimeoutMs:        timeoutMs,
 		StreamTimeoutMs:  intOr(body.StreamTimeoutMs, db.DefaultStreamTimeoutMs),
 		StreamMaxBodyMb:  intOr(body.StreamMaxBodyMb, db.DefaultStreamMaxBodyMb),
+		UpstreamH2C:      upstreamH2C,
 		Route:            route,
 		Enabled:          enabled,
 	})
@@ -1122,6 +1130,7 @@ func (h *AdminResources) updateAPIConfig(w http.ResponseWriter, r *http.Request,
 		TimeoutMs        *int            `json:"timeoutMs"`
 		StreamTimeoutMs  *int            `json:"streamTimeoutMs"`
 		StreamMaxBodyMb  *int            `json:"streamMaxBodyMb"`
+		UpstreamH2C      *bool           `json:"upstreamH2c"`
 		Route            *string         `json:"route"`
 		Enabled          *bool           `json:"enabled"`
 	}
@@ -1156,6 +1165,7 @@ func (h *AdminResources) updateAPIConfig(w http.ResponseWriter, r *http.Request,
 		TimeoutMs:       body.TimeoutMs,
 		StreamTimeoutMs: body.StreamTimeoutMs,
 		StreamMaxBodyMb: body.StreamMaxBodyMb,
+		UpstreamH2C:     body.UpstreamH2C,
 		Route:           body.Route,
 		Enabled:         body.Enabled,
 	}
