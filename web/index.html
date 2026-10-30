@@ -145,23 +145,8 @@
       <div class="panel">
         <div class="panel-head">
           <h2>Providers</h2>
-          <button type="button" id="providerFormToggle" class="secondary small admin-only" aria-expanded="false" aria-controls="providerForm">Add provider</button>
+          <button type="button" id="providerCreateBtn" class="secondary small admin-only">Add provider</button>
         </div>
-        <form id="providerForm" class="form-inline hidden">
-          <input name="name" placeholder="name" required>
-          <select name="type">
-            <option value="openai">openai</option>
-            <option value="anthropic">anthropic</option>
-            <option value="compatible">compatible</option>
-            <option value="openai-responses">openai-responses</option>
-            <option value="responses">responses (pass-through)</option>
-          </select>
-          <input name="baseUrl" placeholder="https://api.example.com/v1" required>
-          <input name="apiKey" placeholder="API key (optional)" autocomplete="off">
-          <input name="headers" placeholder='headers JSON e.g. {"x-user-id":"${uuid}"}' autocomplete="off">
-          <label class="check-row"><input type="checkbox" name="reasoningReplay"> reasoning replay</label>
-          <button type="submit">Add</button>
-        </form>
         <div class="table-wrap">
           <table id="providersTable" data-mobile="cards">
             <thead><tr><th>ID</th><th>Name</th><th>Type</th><th>Base URL</th><th>Headers</th><th>Key</th><th>Enabled</th><th></th></tr></thead>
@@ -176,17 +161,8 @@
       <div class="panel">
         <div class="panel-head">
           <h2>Models (aliases)</h2>
-          <button type="button" id="modelFormToggle" class="secondary small admin-only" aria-expanded="false" aria-controls="modelForm">Add model</button>
+          <button type="button" id="modelCreateBtn" class="secondary small admin-only">Add model</button>
         </div>
-        <form id="modelForm" class="form-inline hidden">
-          <input name="name" placeholder="alias e.g. gpt" required>
-          <input name="providerSearch" placeholder="search provider..." autocomplete="off" list="providerOptions">
-          <datalist id="providerOptions"></datalist>
-          <input name="providerId" placeholder="provider id" type="number" inputmode="numeric" required>
-          <input name="upstreamModel" placeholder="upstream model e.g. gpt-5" required>
-          <button type="submit">Add</button>
-          <p class="hint">Tip: start typing in the provider box to filter the dropdown locally. Model aliases must be unique.</p>
-        </form>
         <div class="table-wrap">
           <table id="modelsTable" data-mobile="cards">
             <thead><tr><th>ID</th><th>Alias</th><th>Provider</th><th>Upstream</th><th>Enabled</th><th></th></tr></thead>
@@ -454,30 +430,47 @@
     </div>
   </dialog>
 
+  <!-- One dialog serves both add and edit; the mode (and, when editing, the
+       row id) is carried on the form's data attributes by tabs/providers.js. -->
   <dialog id="providerEditDialog" class="dialog">
     <div class="dialog-head">
-      <h3>Edit provider <span id="providerEditName"></span></h3>
+      <h3 id="providerDialogTitle">Add provider</h3>
     </div>
-    <form id="providerEditForm" class="dialog-form" data-id="">
+    <form id="providerEditForm" class="dialog-form" data-id="" data-mode="create">
       <div class="dialog-body">
-        <input name="name" placeholder="name" required>
-        <select name="type">
-          <option value="openai">openai</option>
-          <option value="anthropic">anthropic</option>
-          <option value="compatible">compatible</option>
-          <option value="openai-responses">openai-responses</option>
-          <option value="responses">responses (pass-through)</option>
-        </select>
-        <input name="baseUrl" placeholder="https://api.example.com/v1" required>
-        <input name="apiKey" placeholder="new API key (leave blank to keep)" autocomplete="off">
-        <input name="headers" placeholder='headers JSON e.g. {"x-user-id":"${uuid}"}' autocomplete="off">
+        <label class="field">
+          <span>Name</span>
+          <input name="name" placeholder="e.g. openai-main" required>
+        </label>
+        <label class="field">
+          <span>Type</span>
+          <select name="type">
+            <option value="openai">openai</option>
+            <option value="anthropic">anthropic</option>
+            <option value="compatible">compatible</option>
+            <option value="openai-responses">openai-responses</option>
+            <option value="responses">responses (pass-through)</option>
+          </select>
+        </label>
+        <label class="field">
+          <span>Base URL</span>
+          <input name="baseUrl" placeholder="https://api.example.com/v1" required>
+        </label>
+        <label class="field">
+          <span>API key</span>
+          <input name="apiKey" placeholder="API key (optional)" autocomplete="off">
+        </label>
+        <label class="field">
+          <span>Headers (JSON)</span>
+          <input name="headers" placeholder='{"x-user-id":"${uuid}"}' autocomplete="off">
+        </label>
         <p class="hint">Header values may use <code>${client_header}</code> and <code>${_ai_session}</code>.</p>
         <label class="check-row"><input type="checkbox" name="reasoningReplay"> reasoning replay (re-attach dropped reasoning_content on later turns)</label>
         <label class="check-row"><input type="checkbox" name="enabled"> enabled</label>
       </div>
       <div class="dialog-actions">
         <button type="button" id="providerEditCancel" class="secondary">Cancel</button>
-        <button type="submit">Save</button>
+        <button type="submit" id="providerEditSubmit">Create</button>
       </div>
     </form>
   </dialog>
@@ -508,7 +501,11 @@
         </select>
         <input name="streamTimeoutMs" type="number" min="0" placeholder="stream idle timeout ms on /free (blank = 300000 = 5 min; 0 = no timeout)">
         <input name="streamMaxBodyMb" type="number" min="0" placeholder="stream body limit MB on /free (blank = 8; 0 = unlimited)">
-        <label class="check-row"><input type="checkbox" name="upstreamH2C"> upstream h2c (cleartext HTTP/2 for http:// URLs; only if the upstream supports it)</label>
+        <label class="field">
+          <span>Upstream h2c</span>
+          <input type="checkbox" name="upstreamH2C">
+        </label>
+        <p class="hint">Cleartext HTTP/2 for http:// URLs; enable only if the upstream supports it.</p>
         <input name="apiKey" placeholder="upstream key (optional)" autocomplete="off">
         <input name="headers" placeholder='{"Authorization":"Bearer ..."} (JSON, optional)'>
         <input name="requestTemplate" placeholder='{"city":"{{body.city}}"} (JSON, optional)'>
@@ -596,22 +593,37 @@
     </form>
   </dialog>
 
+  <!-- One dialog serves both add and edit; the mode (and, when editing, the
+       row id) is carried on the form's data attributes by tabs/models.js. -->
   <dialog id="modelEditDialog" class="dialog">
     <div class="dialog-head">
-      <h3>Edit model <span id="modelEditName"></span></h3>
+      <h3 id="modelDialogTitle">Add model</h3>
     </div>
-    <form id="modelEditForm" class="dialog-form" data-id="">
+    <form id="modelEditForm" class="dialog-form" data-id="" data-mode="create">
       <div class="dialog-body">
-        <input name="name" placeholder="alias e.g. gpt" required>
-        <input name="providerSearch" placeholder="search provider..." autocomplete="off" list="providerEditOptions">
+        <label class="field">
+          <span>Alias</span>
+          <input name="name" placeholder="e.g. gpt" required>
+        </label>
+        <label class="field">
+          <span>Provider</span>
+          <input name="providerSearch" placeholder="search by name" autocomplete="off" list="providerEditOptions">
+        </label>
         <datalist id="providerEditOptions"></datalist>
-        <input name="providerId" placeholder="provider id" type="number" inputmode="numeric" required>
-        <input name="upstreamModel" placeholder="upstream model e.g. gpt-5" required>
+        <label class="field">
+          <span>Provider ID</span>
+          <input name="providerId" placeholder="provider id" type="number" inputmode="numeric" required>
+        </label>
+        <label class="field">
+          <span>Upstream model</span>
+          <input name="upstreamModel" placeholder="e.g. gpt-5" required>
+        </label>
+        <p class="hint">Start typing a provider name to filter the list; picking one fills the provider ID. Aliases must be unique.</p>
         <label class="check-row"><input type="checkbox" name="enabled"> enabled</label>
       </div>
       <div class="dialog-actions">
         <button type="button" id="modelEditCancel" class="secondary">Cancel</button>
-        <button type="submit">Save</button>
+        <button type="submit" id="modelEditSubmit">Create</button>
       </div>
     </form>
   </dialog>

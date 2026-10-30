@@ -4,7 +4,7 @@
  */
 
 import { api } from "../core/api.js";
-import { askConfirm, badge, bindCollapsible, closeDialog, delButton, el, fillTable, fillTableMessage, openDialog, smallButton, wrapButtons } from "../core/dom.js";
+import { askConfirm, badge, closeDialog, delButton, el, fillTable, fillTableMessage, openDialog, smallButton, wrapButtons } from "../core/dom.js";
 import { clearNotice, notifyError } from "../core/notice.js";
 
 let providers = [];
@@ -41,7 +41,7 @@ export async function loadProviders() {
         p.api_key_masked || "(none)",
         badge(p.enabled ? "ON" : "OFF", p.enabled ? "on" : "off"),
         wrapButtons(
-          smallButton("Edit", () => openProviderEdit(p)),
+          smallButton("Edit", () => openProviderDialog("edit", p)),
           delButton(() =>
             askConfirm({
               title: `Delete provider '${p.name}'?`,
@@ -64,22 +64,32 @@ export async function loadProviders() {
   }
 }
 
-function openProviderEdit(p) {
+// One dialog serves add and edit. Creating starts from the form defaults;
+// editing fills every field and keeps the API key blank (blank = unchanged).
+function openProviderDialog(mode, p) {
   const form = el("providerEditForm");
-  form.dataset.id = p.id;
-  el("providerEditName").textContent = p.name;
-  form.elements.name.value = p.name;
-  form.elements.type.value = p.type;
-  form.elements.baseUrl.value = p.base_url;
-  form.elements.apiKey.value = "";
-  form.elements.apiKey.placeholder = p.has_api_key
-    ? "new API key (leave blank to keep current)"
-    : "API key (optional)";
-  form.elements.headers.value = Object.keys(p.headers || {}).length
-    ? JSON.stringify(p.headers)
-    : "";
-  form.elements.reasoningReplay.checked = Boolean(p.reasoning_replay);
-  form.elements.enabled.checked = Boolean(p.enabled);
+  form.reset();
+  form.dataset.mode = mode;
+  form.dataset.id = p ? String(p.id) : "";
+  form.elements.enabled.checked = true;
+  el("providerDialogTitle").textContent = mode === "edit" && p ? `Edit provider ${p.name}` : "Add provider";
+  el("providerEditSubmit").textContent = mode === "edit" ? "Save" : "Create";
+
+  if (mode === "edit" && p) {
+    form.elements.name.value = p.name;
+    form.elements.type.value = p.type;
+    form.elements.baseUrl.value = p.base_url;
+    form.elements.apiKey.placeholder = p.has_api_key
+      ? "new API key (leave blank to keep current)"
+      : "API key (optional)";
+    form.elements.headers.value = Object.keys(p.headers || {}).length
+      ? JSON.stringify(p.headers)
+      : "";
+    form.elements.reasoningReplay.checked = Boolean(p.reasoning_replay);
+    form.elements.enabled.checked = Boolean(p.enabled);
+  } else {
+    form.elements.apiKey.placeholder = "API key (optional)";
+  }
   openDialog("providerEditDialog");
 }
 
@@ -106,13 +116,13 @@ function parseHeaderInput(raw) {
 }
 
 export function initProviders() {
-  const addProvider = bindCollapsible("providerFormToggle", "providerForm");
+  el("providerCreateBtn").onclick = () => openProviderDialog("create");
 
   el("providerEditForm").onsubmit = async (event) => {
     event.preventDefault();
     const form = event.target;
     clearNotice(form);
-    const id = form.dataset.id;
+    const mode = form.dataset.mode;
     try {
       const body = {
         name: form.elements.name.value,
@@ -123,8 +133,13 @@ export function initProviders() {
         enabled: form.elements.enabled.checked,
       };
       const newKey = form.elements.apiKey.value.trim();
-      if (newKey) body.apiKey = newKey; // only send when rotating
-      await api(`/admin/providers/${id}`, { method: "PUT", body: JSON.stringify(body) });
+      if (mode === "edit") {
+        if (newKey) body.apiKey = newKey; // only send when rotating
+        await api(`/admin/providers/${form.dataset.id}`, { method: "PUT", body: JSON.stringify(body) });
+      } else {
+        body.apiKey = newKey || null;
+        await api("/admin/providers", { method: "POST", body: JSON.stringify(body) });
+      }
       closeDialog("providerEditDialog");
       invalidateProviders();
       loadProviders();
@@ -134,29 +149,4 @@ export function initProviders() {
   };
 
   el("providerEditCancel").onclick = () => closeDialog("providerEditDialog");
-
-  el("providerForm").onsubmit = async (event) => {
-    event.preventDefault();
-    clearNotice(event.target);
-    const form = new FormData(event.target);
-    try {
-      await api("/admin/providers", {
-        method: "POST",
-        body: JSON.stringify({
-          name: form.get("name"),
-          type: form.get("type"),
-          baseUrl: form.get("baseUrl"),
-          headers: parseHeaderInput(form.get("headers")),
-          reasoningReplay: form.get("reasoningReplay") === "on",
-          apiKey: form.get("apiKey") || null,
-        }),
-      });
-      event.target.reset();
-      addProvider.setOpen(false);
-      invalidateProviders();
-      loadProviders();
-    } catch (e) {
-      notifyError(e.message, { form: event.target });
-    }
-  };
 }
