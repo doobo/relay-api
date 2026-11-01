@@ -138,6 +138,11 @@ func noteDroppedUsage() {
 	}
 }
 
+// DroppedUsage reports how many usage rows were discarded because the async
+// queue was full. It is exposed through /admin/stats so a burst that overruns
+// the writer is visible without grepping logs.
+func DroppedUsage() uint64 { return droppedUsage.Load() }
+
 // usageMessage is one queue item: either a record to store, or a barrier whose
 // close signals that everything queued before it has been flushed.
 type usageMessage struct {

@@ -171,3 +171,57 @@ func TestResolveAPIConfigCacheInvalidation(t *testing.T) {
 		t.Fatalf("deleted config still served: %+v", config)
 	}
 }
+
+// TestAPIConfigCachePreRendersStaticHeaders verifies the cache classifies
+// config headers: constant templates are rendered once, while any dynamic
+// placeholder keeps the whole set on the per-request path.
+func TestAPIConfigCachePreRendersStaticHeaders(t *testing.T) {
+	t.Setenv("SECRET_KEY_FILE", filepath.Join(t.TempDir(), ".secret-key"))
+	t.Setenv("SECRET_ENCRYPTION_KEY", "")
+
+	if _, err := Open(filepath.Join(t.TempDir(), "headers.db")); err != nil {
+		t.Fatalf("open db: %v", err)
+	}
+	t.Cleanup(func() { _ = Close() })
+	if err := Migrate(Get()); err != nil {
+		t.Fatalf("migrate: %v", err)
+	}
+
+	static := `{"X-Static":"fixed","X-Other":"also-fixed"}`
+	if _, err := CreateAPIConfig(NewAPIConfig{
+		Name: "static", Method: "POST", URL: "https://example.com/v1",
+		Headers: &static, Route: "free", Enabled: true,
+	}); err != nil {
+		t.Fatalf("create static config: %v", err)
+	}
+
+	dynamic := `{"X-Static":"fixed","X-Template":"{{headers.xid}}"}`
+	if _, err := CreateAPIConfig(NewAPIConfig{
+		Name: "dynamic", Method: "POST", URL: "https://example.com/v1",
+		Headers: &dynamic, Route: "free", Enabled: true,
+	}); err != nil {
+		t.Fatalf("create dynamic config: %v", err)
+	}
+
+	resolve := func(t *testing.T, path string) *APIConfigRow {
+		t.Helper()
+		config, _, err := ResolveAPIConfig(path, "free")
+		if err != nil || config == nil {
+			t.Fatalf("resolve %q: config=%v err=%v", path, config, err)
+		}
+		return config
+	}
+
+	cached := resolve(t, "static")
+	if cached.ParsedHeadersDynamic {
+		t.Fatal("static headers marked dynamic")
+	}
+	if cached.ParsedHeadersStatic["X-Static"] != "fixed" || cached.ParsedHeadersStatic["X-Other"] != "also-fixed" {
+		t.Fatalf("static headers = %#v", cached.ParsedHeadersStatic)
+	}
+
+	mixed := resolve(t, "dynamic")
+	if !mixed.ParsedHeadersDynamic || mixed.ParsedHeadersStatic != nil {
+		t.Fatalf("dynamic headers = dynamic:%v static:%#v", mixed.ParsedHeadersDynamic, mixed.ParsedHeadersStatic)
+	}
+}

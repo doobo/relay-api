@@ -14,8 +14,6 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
-
-	"golang.org/x/net/http2"
 )
 
 // ErrUpstreamTimeout marks a request that exceeded its configured timeout (as
@@ -83,28 +81,40 @@ var httpsTransport = &http.Transport{
 	},
 }
 
+// h2cProtocols makes the h2c client speak only cleartext HTTP/2 for http://
+// URLs. HTTP/1.1 is left out on purpose: an h2c opt-in must not silently fall
+// back to HTTP/1.1 (the previous x/net/http2.Transport behaved the same way).
+var h2cProtocols = func() *http.Protocols {
+	protocols := new(http.Protocols)
+	protocols.SetUnencryptedHTTP2(true)
+	return protocols
+}()
+
 // h2cTransport serves cleartext HTTP/2 upstreams. It is used only by requests
 // whose config sets FetchOptions.H2C, because a plain HTTP/1.1 upstream (most
 // APIs, and any server without a cleartext HTTP/2 listener) rejects an h2c
 // preface.
-var h2cTransport = &http2.Transport{
-	AllowHTTP: true,
+//
+// This uses the standard library transport rather than x/net/http2.Transport:
+// connection pooling, dial timeouts and HTTP/2 settings then behave exactly
+// like the TLS transport above. Proxy is nil because an XHTTP upstream is
+// reached directly (the bundled XHTTP configs are local/private endpoints).
+var h2cTransport = &http.Transport{
+	Proxy:               nil,
+	Protocols:           h2cProtocols,
+	MaxIdleConns:        maxIdleConns,
+	MaxIdleConnsPerHost: maxIdleConnsPerHost,
+	IdleConnTimeout:     idleConnTimeout,
+	DialContext: (&net.Dialer{
+		Timeout:   dialTimeout,
+		KeepAlive: dialKeepAlive,
+	}).DialContext,
 	// Match the TLS transport's frame size and silence detection so an h2c
 	// upstream gets the same throughput and dead-connection handling.
-	MaxReadFrameSize: upstreamMaxReadFrameSize,
-	ReadIdleTimeout:  upstreamHTTP2SendPing,
-	PingTimeout:      upstreamHTTP2PingWait,
-	// AllowHTTP makes the transport use h2c for http:// URLs, so the dialer
-	// must hand back a plain connection instead of a TLS one. Note that
-	// http2.Transport multiplexes every stream over one connection and does
-	// not consult a proxy - both are deliberate for an XHTTP upstream. The
-	// dialer gets the same connect/keepalive bounds as the TLS transport so a
-	// black-holed upstream cannot hold the relay's request goroutine.
-	DialTLSContext: func(ctx context.Context, network, addr string, _ *tls.Config) (net.Conn, error) {
-		return (&net.Dialer{
-			Timeout:   dialTimeout,
-			KeepAlive: dialKeepAlive,
-		}).DialContext(ctx, network, addr)
+	HTTP2: &http.HTTP2Config{
+		MaxReadFrameSize: upstreamMaxReadFrameSize,
+		SendPingTimeout:  upstreamHTTP2SendPing,
+		PingTimeout:      upstreamHTTP2PingWait,
 	},
 }
 
@@ -119,7 +129,14 @@ var h2cClient = &http.Client{Transport: h2cTransport}
 type FetchOptions struct {
 	Method  string
 	Headers map[string]string
-	Body    io.Reader
+	// Header, when non-nil, is installed as the request header instead of
+	// building one from Headers. The relay's hot path already has an
+	// http.Header (client headers plus config headers), so this avoids a
+	// map->header conversion per request. The map is not cloned; callers must
+	// not mutate it until the response body is closed. Keys here replace
+	// same-named keys from Headers.
+	Header http.Header
+	Body   io.Reader
 	// TimeoutMs bounds the whole request, including reading the body. Use it
 	// for non-streaming calls.
 	TimeoutMs int
@@ -385,6 +402,9 @@ func do(ctx context.Context, rawURL string, opts FetchOptions) (*http.Response, 
 	for key, value := range opts.Headers {
 		request.Header.Set(key, value)
 	}
+	for key, values := range opts.Header {
+		request.Header[key] = values
+	}
 	if opts.H2C && request.URL.Scheme == "http" {
 		return h2cClient.Do(request)
 	}
@@ -491,6 +511,22 @@ func ForwardedRequestHeaders(headers http.Header) map[string]string {
 	return out
 }
 
+// ForwardedRequestHeader is the http.Header fast path of
+// ForwardedRequestHeaders: it copies the first value of each allowed client
+// header into a fresh header set, preserving the canonical names net/http
+// already parsed. The relay uses it so the tunnel does not allocate an
+// intermediate map[string]string and then copy it again into the request.
+func ForwardedRequestHeader(headers http.Header) http.Header {
+	out := make(http.Header, len(headers))
+	for key, values := range headers {
+		if len(values) == 0 || requestHeaderBlocklist[strings.ToLower(key)] {
+			continue
+		}
+		out[key] = values[:1]
+	}
+	return out
+}
+
 // FilterRequestHeaders drops blocked headers from a client header set.
 func FilterRequestHeaders(headers map[string]string) map[string]string {
 	out := make(map[string]string, len(headers))
@@ -512,6 +548,20 @@ func FilterResponseHeaders(headers http.Header) map[string]string {
 		out[key] = values[0]
 	}
 	return out
+}
+
+// CopyResponseHeaders writes the upstream response headers that are safe to
+// relay directly onto dst, skipping the map allocation FilterResponseHeaders
+// would make. It is the streaming fast path used by the tunnel and SSE relay.
+func CopyResponseHeaders(dst http.Header, src http.Header) {
+	for key, values := range src {
+		if len(values) == 0 || responseHeaderBlocklist[strings.ToLower(key)] {
+			continue
+		}
+		// Canonicalise once here, matching Header.Set, so an HTTP/1.1 client
+		// does not see mixed-case names from a lowercased h2 upstream.
+		dst[http.CanonicalHeaderKey(key)] = values
+	}
 }
 
 // ResolveUpstreamMethod decides the method for a forwarded config request:

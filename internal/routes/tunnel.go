@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"strconv"
 	"strings"
 	"sync"
@@ -14,6 +15,7 @@ import (
 
 	"relay-api/internal/db"
 	"relay-api/internal/httperr"
+	"relay-api/internal/metrics"
 	"relay-api/internal/middleware"
 	"relay-api/internal/util"
 )
@@ -78,8 +80,9 @@ func (h *TunnelRoutes) handle(w http.ResponseWriter, r *http.Request) {
 	requestID := middleware.RequestID(r.Context())
 	startedAt := time.Now()
 
-	clientIP := util.ClientIP(r)
 	configPath := strings.Trim(r.PathValue("path"), "/")
+	metrics.TunnelActive.Add(1)
+	defer metrics.TunnelActive.Add(-1)
 	apiConfig, rest, err := db.ResolveAPIConfig(configPath, "free")
 	if err != nil {
 		internalError(w, "resolve api config", err)
@@ -95,20 +98,28 @@ func (h *TunnelRoutes) handle(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	var targetURL *string
+	// The target URL and client IP are only needed for the usage row. Resolve
+	// them after sampling so the common un-sampled packet-mode request does not
+	// pay for a ClientIP parse and a scheme://host/path concatenation.
+	var parsedURL *url.URL
 	record := func(status int, errMsg *string) {
 		if !h.shouldRecord(status, errMsg) {
 			return
 		}
 		configID := apiConfig.ID
 		latency := time.Since(startedAt).Milliseconds()
-		ip := clientIP
+		ip := util.ClientIP(r)
+		var target *string
+		if parsedURL != nil {
+			value := parsedURL.Scheme + "://" + parsedURL.Host + parsedURL.Path
+			target = &value
+		}
 		db.RecordUsageAsync(db.UsageRecord{
 			RequestID:   requestID,
 			APIKeyID:    nil,
 			Kind:        "api",
 			APIConfigID: &configID,
-			TargetURL:   targetURL,
+			TargetURL:   target,
 			LatencyMs:   &latency,
 			Status:      &status,
 			Stream:      true,
@@ -122,14 +133,14 @@ func (h *TunnelRoutes) handle(w http.ResponseWriter, r *http.Request) {
 	// up) could never both be served.
 	clientMethod := strings.ToUpper(r.Method)
 
-	headerTemplates := configHeaderTemplates(apiConfig)
+	staticHeaders, dynamicTemplates := configHeaderPlan(apiConfig)
 
 	// Config headers still work, but only headers/query can be templated: a
-	// tunnel never parses the body, so {{body.*}} has nothing to read. Building
-	// the template context is skipped entirely for the common static-header
-	// case, and the upstream map is built in a single header pass.
+	// tunnel never parses the body, so {{body.*}} has nothing to read. Static
+	// values are pre-rendered by the config cache, and the template context is
+	// built only when a template actually references it.
 	var templateContext map[string]any
-	if headerTemplatesDynamic(headerTemplates) {
+	if len(dynamicTemplates) > 0 {
 		headersContext := map[string]any{}
 		for key, values := range r.Header {
 			if len(values) > 0 {
@@ -145,23 +156,22 @@ func (h *TunnelRoutes) handle(w http.ResponseWriter, r *http.Request) {
 		templateContext = map[string]any{"headers": headersContext, "query": queryContext, "body": nil}
 	}
 
-	var renderedConfigHeaders map[string]string
-	if len(headerTemplates) > 0 {
-		renderedConfigHeaders = make(map[string]string, len(headerTemplates))
-		for key, template := range headerTemplates {
-			renderedConfigHeaders[key] = asString(template.Render(templateContext))
-		}
+	// Build the upstream header set directly as an http.Header: the tunnel then
+	// skips the intermediate map[string]string that FetchOptions.Headers would
+	// copy into the request.
+	upstreamHeaders := util.ForwardedRequestHeader(r.Header)
+	for key, value := range staticHeaders {
+		upstreamHeaders.Set(key, value)
 	}
-	upstreamHeaders := util.ForwardedRequestHeaders(r.Header)
-	for key, value := range renderedConfigHeaders {
-		upstreamHeaders[key] = value
+	for key, template := range dynamicTemplates {
+		upstreamHeaders.Set(key, asString(template.Render(templateContext)))
 	}
 	// Never negotiate compression on a tunnel: a compressed upstream stream
 	// would have to be decompressed (and thus buffered) on the way back, which
 	// breaks long-lived protocols and can re-encode bytes the client expects
 	// verbatim.
-	upstreamHeaders["accept-encoding"] = "identity"
-	upstreamHeaders["x-request-id"] = requestID
+	upstreamHeaders.Set("accept-encoding", "identity")
+	upstreamHeaders.Set("x-request-id", requestID)
 
 	// Stored config keys are encrypted at rest; upstream needs plaintext. The
 	// cache decrypts them once when the config set loads (see configAPIKey).
@@ -171,12 +181,15 @@ func (h *TunnelRoutes) handle(w http.ResponseWriter, r *http.Request) {
 			internalError(w, "decrypt api config key", err)
 			return
 		}
-		if plaintext != "" && !hasHeader(renderedConfigHeaders, "authorization") {
-			upstreamHeaders["authorization"] = "Bearer " + plaintext
+		// A config header named authorization wins over the stored key.
+		if plaintext != "" {
+			if _, exists := upstreamHeaders["Authorization"]; !exists {
+				upstreamHeaders.Set("authorization", "Bearer "+plaintext)
+			}
 		}
 	}
 
-	parsedURL, err := configUpstreamURL(apiConfig)
+	parsedURL, err = configUpstreamURL(apiConfig)
 	if err != nil {
 		invalidRequest(w, err.Error())
 		return
@@ -185,9 +198,6 @@ func (h *TunnelRoutes) handle(w http.ResponseWriter, r *http.Request) {
 		parsedURL.Path = strings.TrimRight(parsedURL.Path, "/") + "/" + rest
 	}
 	parsedURL.RawQuery = r.URL.RawQuery
-	// Recorded without the query string: it can carry client secrets.
-	target := parsedURL.Scheme + "://" + parsedURL.Host + parsedURL.Path
-	targetURL = &target
 
 	// Raw body passthrough: the client stream is handed upstream untouched, so
 	// nothing is buffered, decoded as text, or JSON-parsed. The size cap is
@@ -236,7 +246,7 @@ func (h *TunnelRoutes) handle(w http.ResponseWriter, r *http.Request) {
 	// (r.Context()), so a dead tunnel does not keep an upstream request alive.
 	response, err := util.FetchUpstream(r.Context(), "", util.FetchOptions{
 		Method:            clientMethod,
-		Headers:           upstreamHeaders,
+		Header:            upstreamHeaders,
 		Body:              body,
 		ContentLength:     contentLength,
 		HeaderTimeoutMs:   apiConfig.StreamTimeoutMs,
@@ -275,9 +285,7 @@ func (h *TunnelRoutes) handle(w http.ResponseWriter, r *http.Request) {
 
 	// Stream the upstream response straight back - the body is copied in chunks
 	// and flushed as it arrives, so chunked/push responses keep their timing.
-	for key, value := range util.FilterResponseHeaders(response.Header) {
-		w.Header().Set(key, value)
-	}
+	util.CopyResponseHeaders(w.Header(), response.Header)
 	// HTTP/2 trailers carry gRPC's grpc-status and similar end-of-stream
 	// metadata. They only survive the relay when the keys are declared before
 	// WriteHeader; forwardTrailers below fills in the values after the copy.
@@ -534,6 +542,7 @@ func copyAndFlush(w http.ResponseWriter, src io.Reader) (int64, error) {
 				copy(buffer, (*smallPtr)[:n])
 				tunnelSmallBufferPool.Put(smallPtr)
 				smallPtr = nil
+				metrics.CopyBufferPromotions.Add(1)
 			}
 			if _, writeErr := w.Write(buffer[:n]); writeErr != nil {
 				return written, fmt.Errorf("%w: %v", errClientDisconnected, writeErr)

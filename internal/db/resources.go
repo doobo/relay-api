@@ -687,6 +687,15 @@ type APIConfigRow struct {
 	ParsedHeaders          map[string]*util.Template `json:"-"`
 	ParsedRequestTemplate  *util.Template            `json:"-"`
 	ParsedResponseTemplate *util.Template            `json:"-"`
+	// ParsedHeadersStatic holds the rendered value of every header template
+	// that does not reference the request context. It is nil when any template
+	// is dynamic (the handler then renders the full ParsedHeaders map) or when
+	// the row did not come through the enabled-config cache.
+	ParsedHeadersStatic map[string]string `json:"-"`
+	// ParsedHeadersDynamic reports whether at least one header template needs
+	// the request context. Cached alongside ParsedHeaders so the relay does not
+	// re-scan the template tree on every packet-mode request.
+	ParsedHeadersDynamic bool `json:"-"`
 
 	// ParsedURL and ParsedKey are the per-config work the relay would otherwise
 	// redo on every request: url.Parse + scheme checks, and one AES-GCM

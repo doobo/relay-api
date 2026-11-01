@@ -350,7 +350,8 @@ func TestAdminUsageLogsAndCleanup(t *testing.T) {
 			Today struct {
 				Requests int `json:"requests"`
 			} `json:"today"`
-			Models []modelStatDTO `json:"models"`
+			Models  []modelStatDTO `json:"models"`
+			Runtime map[string]any `json:"runtime"`
 		}
 		decodeInto(t, recorder, &body)
 		if body.Today.Requests != 4 {
@@ -358,6 +359,11 @@ func TestAdminUsageLogsAndCleanup(t *testing.T) {
 		}
 		if len(body.Models) != 1 || body.Models[0].Model != "gpt-4o" || body.Models[0].Requests != 3 {
 			t.Fatalf("unexpected models: %+v", body.Models)
+		}
+		for _, key := range []string{"tunnel_active", "copy_buffer_promotions", "usage_dropped", "http2_errors"} {
+			if _, ok := body.Runtime[key]; !ok {
+				t.Fatalf("runtime metrics missing %q: %+v", key, body.Runtime)
+			}
 		}
 	})
 

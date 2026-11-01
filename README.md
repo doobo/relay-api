@@ -80,6 +80,11 @@ CGO_ENABLED=0 go build -trimpath -ldflags "-s -w" -o relay-api .
 | `TUNNEL_USAGE_SAMPLE` | `10` | `/free` 成功请求写入用量日志的采样率，`N` 表示每 N 条记录 1 条；错误请求始终记录 |
 | `TUNNEL_COPY_BUFFER_KB` | `64` | `/free` 转发时可升级到的拷贝块大小（KiB，会被夹在 32 KiB~1 MiB 之间）。每条响应先使用 8 KiB 小块，只有读满小块时才升级到该值，因此空闲隧道只占 8 KiB；乘以并发隧道数即为常驻内存的大致上限，高带宽长连接部署可调到 `128`，配合 `GOMEMLIMIT` 使用 |
 | `H2C_MAX_CONCURRENT_STREAMS` | `2048` | 每条 h2c/h2 连接向客户端公告的最大并发流数（连接级 SETTINGS，仅对新连接生效，修改需重启）。它不是按 API Config 配置的：一条连接上所有配置共用同一上限；超限的流会被 `REFUSED_STREAM`，由客户端重试，且每条流都可能占用上传缓冲与拷贝块 |
+| `H2C_READ_FRAME_KB` | `64` | 服务端接受的最大 HTTP/2 帧（KiB，夹在 16~16384 之间）。小帧降低每连接读缓冲，大帧减少上传方向的帧头开销 |
+| `H2C_STREAM_BUFFER_KB` | `1024` | 单条 HTTP/2 流的接收窗口（KiB，夹在 64~4095 之间）；高 BDP 链路可调大，内存按并发流数放大 |
+| `H2C_CONNECTION_BUFFER_KB` | `2048` | 每条 HTTP/2 连接的接收窗口（KiB，夹在 64~4095 之间）；上传方向并发多时可调大 |
+| `H2C_DISABLE_CLIENT_PRIORITY` | `false` | 是否关闭 RFC 9218 客户端优先级调度；packet 模式下大量等价小流可设为 `true` 减少调度开销 |
+| `LISTEN_REUSEPORT` | `1` | 使用 SO_REUSEPORT 绑定的监听器数量（1~64）。大于 1 时内核把新连接分散到多个 accept 循环，适合高连接速率；不支持该选项的平台自动回退为 1 |
 | `USAGE_HEADER_SNAPSHOTS` | `true` | 是否在用量日志中保存请求/上游 header 快照；设为 `false` 可减少 CPU 开销与数据库体积 |
 | `LOG_RETENTION_DAYS` | `7` | 用量/审计日志保留天数；`0` 表示永久保留。周/月配额不依赖日志（见“配额与日志保留”），可以放心设短 |
 | `LOG_CLEANUP_TIME` | `03:00` | 每日自动清理的本地时间（`HH:MM`）；进程启动时也会补跑一次，避免频繁重启错过清理 |
@@ -209,6 +214,7 @@ make build        # 静态编译到 ./relay-api
 make run          # 本地启动（make run ENV="PORT=8080 LOG_LEVEL=debug"）
 make all          # 编译 + 测试，提交前跑这个
 make test         # 运行测试（make race 带竞态检测，make cover 出覆盖率报告）
+make bench        # /free 拷贝循环与完整 handler 的基准测试
 make vet fmt-check # 静态检查与格式检查
 make clean        # 删除二进制与覆盖率文件
 ```
@@ -233,7 +239,7 @@ make clean-dist                       # 删除 dist/
 - `CGO_ENABLED=0` 静态编译（SQLite 驱动为纯 Go 的 `modernc.org/sqlite`）
 - 持久化 `DATABASE_PATH` 指向的目录，并同时保留 `SECRET_KEY_FILE`，二者需一起备份
 - 访问日志经有界队列（8192 条）批量异步写入 stdout：攒到 64 KiB 或 **100 行**（先到者）即刷一批，最多等 200 ms；请求线程只入队，stdout 被阻塞时不会拖慢网站或 `/v1`，队列满的日志会被丢弃并在下一次落盘时输出 `dropped=N` 统计；请确保日志消费者（docker logs、面板、重定向文件）正常读取
-- 仪表盘“今日”统计由内存计数器维护：启动时从 SQLite 预热一次，之后随用量写入实时递增，不会随着 `usage_logs` 变大而变慢；`/admin/stats` 默认不返回全量配置统计，脚本需要时加 `?full=1`
+- 仪表盘“今日”统计由内存计数器维护：启动时从 SQLite 预热一次，之后随用量写入实时递增，不会随着 `usage_logs` 变大而变慢；`/admin/stats` 默认不返回全量配置统计，脚本需要时加 `?full=1`。响应里的 `runtime` 字段暴露 `tunnel_active`、`copy_buffer_promotions`、`usage_dropped` 与 `http2_errors`，可直接判断隧道并发、拷贝块升级比例、用量队列丢弃和 HTTP/2 协议错误
 - 服务器层刻意不设置 `WriteTimeout`/`ReadTimeout`（二者都是总时长限制，长连接 SSE 与 `/free` 隧道需要），改用 `SERVER_IDLE_TIMEOUT_MS` 回收请求间的空闲连接、`SEND_TIMEOUT_MS` 处理写不动的客户端；处理器内再用 `STREAM_IDLE_TIMEOUT_MS` 控制上游空闲
 - 反向代理需允许长连接并关闭响应缓冲（Nginx 参考：`proxy_buffering off;`），否则流式响应会被缓冲
 
@@ -250,7 +256,7 @@ make clean-dist                       # 删除 dist/
 
   默认的 1024 软上限大约只能撑 500 条并发隧道，达到上限后 `accept()` 报 `EMFILE`，**包括 `/v1` 在内的所有新请求都会被拒绝**。
 - **单条隧道的内存**：`copyAndFlush` 先取 8 KiB 小块，只有一次读满 8 KiB（说明上游还有大量数据排队）才升级到 `TUNNEL_COPY_BUFFER_KB`（默认 64 KiB）的大块，且升级后不再降级。大多数 XHTTP 短请求/慢速长连接始终停在 8 KiB，3000 条并发约 24 MiB；满载的大流量隧道才按 64 KiB 计（约 190 MiB 的上限），另有每条隧道的 goroutine 栈与 http2 流控缓冲。`H2C_MAX_CONCURRENT_STREAMS` 决定单连接最多能同时存在多少条这样的流，两者一起调大前先按并发数估算。
-- **HTTP/2 并发流**：`H2C_MAX_CONCURRENT_STREAMS`（默认 2048）是**连接级** SETTINGS，不是按 API Config 配置的；它只影响新连接（改完需重启），超限的流返回 `REFUSED_STREAM` 由客户端重试。另外端到端并发还受上游那一跳公告的流数上限约束，一味调大入口上限可能只是把排队位置前移。
+- **HTTP/2 并发流**：`H2C_MAX_CONCURRENT_STREAMS`（默认 2048）是**连接级** SETTINGS，不是按 API Config 配置的；它只影响新连接（改完需重启），超限的流返回 `REFUSED_STREAM` 由客户端重试。另外端到端并发还受上游那一跳公告的流数上限约束，一味调大入口上限可能只是把排队位置前移。接收窗口由 `H2C_STREAM_BUFFER_KB` / `H2C_CONNECTION_BUFFER_KB` 控制，上传型负载可分别调大后再压测。
 - **堆上限**：建议给 Go 设置软上限 `GOMEMLIMIT`（约为容器内存的 60%~75%），否则运行时可能要等到约 2 倍活跃堆才 GC，突发缓冲很容易把内存顶爆：
 
   ```bash
@@ -274,10 +280,10 @@ make clean-dist                       # 删除 dist/
 | 模块 | 协议 | 用途 |
 | --- | --- | --- |
 | `golang.org/x/crypto` | BSD-3-Clause | bcrypt 密码哈希、登录挑战的 nacl/box |
-| `golang.org/x/net` | BSD-3-Clause | `http2`（h2c 上游客户端）；服务端的单端口明文 HTTP/2 已改用标准库 `net/http` |
 | `modernc.org/sqlite` | BSD-3-Clause | 纯 Go SQLite 驱动；内嵌的 SQLite 本体为 Public Domain |
 | `modernc.org/libc`、`modernc.org/mathutil`、`modernc.org/memory` | BSD-3-Clause | 间接依赖（`modernc.org/sqlite` 使用） |
-| `golang.org/x/sys`、`golang.org/x/text` | BSD-3-Clause | 间接依赖 |
+| `golang.org/x/sys` | BSD-3-Clause | Linux/macOS 上设置 `SO_REUSEPORT`（`LISTEN_REUSEPORT`）；其余为间接依赖 |
+| `golang.org/x/text` | BSD-3-Clause | 间接依赖 |
 | `github.com/google/uuid`、`github.com/remyoudompheng/bigfft` | BSD-3-Clause | 间接依赖 |
 | `github.com/dustin/go-humanize`、`github.com/mattn/go-isatty`、`github.com/ncruces/go-strftime` | MIT | 间接依赖 |
 

@@ -101,9 +101,9 @@ func (h *ForwardRoutes) handle(w http.ResponseWriter, r *http.Request) {
 	method := util.ResolveUpstreamMethod(apiConfig.Method, clientMethod)
 
 	rawBody := middleware.RequestBody(r.Context())
-	headerTemplates := configHeaderTemplates(apiConfig)
+	staticHeaders, dynamicHeaders := configHeaderPlan(apiConfig)
 	requestTemplate := configRequestTemplate(apiConfig)
-	needsTemplateContext := headerTemplatesDynamic(headerTemplates) ||
+	needsTemplateContext := len(dynamicHeaders) > 0 ||
 		(requestTemplate != nil && requestTemplate.Dynamic())
 
 	// The template context is only built when a template actually references
@@ -139,9 +139,12 @@ func (h *ForwardRoutes) handle(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var renderedConfigHeaders map[string]string
-	if len(headerTemplates) > 0 {
-		renderedConfigHeaders = make(map[string]string, len(headerTemplates))
-		for key, template := range headerTemplates {
+	if len(staticHeaders)+len(dynamicHeaders) > 0 {
+		renderedConfigHeaders = make(map[string]string, len(staticHeaders)+len(dynamicHeaders))
+		for key, value := range staticHeaders {
+			renderedConfigHeaders[key] = value
+		}
+		for key, template := range dynamicHeaders {
 			renderedConfigHeaders[key] = asString(template.Render(templateContext))
 		}
 	}
@@ -270,9 +273,7 @@ func (h *ForwardRoutes) handle(w http.ResponseWriter, r *http.Request) {
 }
 
 func writeUpstreamHeaders(w http.ResponseWriter, header http.Header, requestID string) {
-	for key, value := range util.FilterResponseHeaders(header) {
-		w.Header().Set(key, value)
-	}
+	util.CopyResponseHeaders(w.Header(), header)
 	w.Header().Set("X-Request-ID", requestID)
 }
 
@@ -332,14 +333,29 @@ func configResponseTemplate(config *db.APIConfigRow) *util.Template {
 	return util.ParseTemplate(value)
 }
 
-// headerTemplatesDynamic reports whether any header needs the template context.
-func headerTemplatesDynamic(templates map[string]*util.Template) bool {
-	for _, template := range templates {
-		if template.Dynamic() {
-			return true
-		}
+// configHeaderPlan splits the config's headers into values that are constant
+// (pre-rendered when the enabled-config cache was built) and templates that
+// still need the request context. Rows loaded outside the cache fall back to a
+// per-request classification, matching the previous behaviour.
+func configHeaderPlan(config *db.APIConfigRow) (static map[string]string, dynamic map[string]*util.Template) {
+	templates := configHeaderTemplates(config)
+	if len(templates) == 0 {
+		return nil, nil
 	}
-	return false
+	if config.ParsedHeadersDynamic {
+		return nil, templates
+	}
+	if config.ParsedHeadersStatic != nil {
+		return config.ParsedHeadersStatic, nil
+	}
+	static = make(map[string]string, len(templates))
+	for key, template := range templates {
+		if template.Dynamic() {
+			return nil, templates
+		}
+		static[key] = asString(template.Render(nil))
+	}
+	return static, nil
 }
 
 // parseStringMap decodes a stored JSON object of strings.

@@ -94,10 +94,24 @@ func compileAPIConfigTemplates(items []APIConfigRow) {
 			var headers map[string]string
 			if err := json.Unmarshal([]byte(*config.Headers), &headers); err == nil && len(headers) > 0 {
 				templates := make(map[string]*util.Template, len(headers))
+				static := make(map[string]string, len(headers))
+				dynamic := false
 				for name, value := range headers {
-					templates[name] = util.ParseTemplate(value)
+					template := util.ParseTemplate(value)
+					templates[name] = template
+					if template.Dynamic() {
+						dynamic = true
+						continue
+					}
+					static[name] = templateValueString(template.Render(nil))
 				}
 				config.ParsedHeaders = templates
+				config.ParsedHeadersDynamic = dynamic
+				if !dynamic {
+					// Every header is constant: pre-render once so the relay can
+					// copy these directly instead of rendering each request.
+					config.ParsedHeadersStatic = static
+				}
 			}
 		}
 		config.ParsedRequestTemplate = compileJSONTemplate(config.RequestTemplate)
@@ -117,6 +131,24 @@ func compileAPIConfigTemplates(items []APIConfigRow) {
 				config.ParsedKey = &plaintext
 			}
 		}
+	}
+}
+
+// templateValueString renders a constant template value as a header string,
+// mirroring routes.asString (JSON-encode non-strings) without importing the
+// routes package.
+func templateValueString(value any) string {
+	switch typed := value.(type) {
+	case nil:
+		return ""
+	case string:
+		return typed
+	default:
+		encoded, err := json.Marshal(typed)
+		if err != nil {
+			return ""
+		}
+		return string(encoded)
 	}
 }
 

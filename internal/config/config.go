@@ -135,6 +135,23 @@ type Config struct {
 	// is connection-level SETTINGS, so it applies to new connections only and
 	// needs a restart.
 	H2CMaxConcurrentStreams int
+	// H2CReadFrameKB is the largest frame the server accepts (16 KiB..16 MiB).
+	// Smaller frames cap per-connection read buffers; larger ones reduce frame
+	// header overhead on uploads.
+	H2CReadFrameKB int
+	// H2CStreamBufferKB is the per-stream HTTP/2 receive window (<4 MiB).
+	H2CStreamBufferKB int
+	// H2CConnectionBufferKB is the per-connection HTTP/2 receive window
+	// (>=64 KiB and <4 MiB).
+	H2CConnectionBufferKB int
+	// H2CDisableClientPriority turns off RFC 9218 priority scheduling. Packet
+	// mode has thousands of equivalent tiny streams, so priority bookkeeping is
+	// mostly overhead there.
+	H2CDisableClientPriority bool
+	// ListenReusePort is the number of SO_REUSEPORT listeners to bind on the
+	// same port. 1 keeps the historical single accept loop; >1 spreads accepts
+	// across processes/cores on platforms that support it.
+	ListenReusePort int
 	// UsageHeaderSnapshots stores request/upstream header JSON on every usage
 	// row. Disabling it saves CPU and keeps usage_logs small.
 	UsageHeaderSnapshots bool
@@ -178,6 +195,11 @@ func Load() Config {
 		TunnelUsageSample:         intEnv("TUNNEL_USAGE_SAMPLE", 10),
 		TunnelCopyBufferKB:        intEnv("TUNNEL_COPY_BUFFER_KB", 64),
 		H2CMaxConcurrentStreams:   intEnv("H2C_MAX_CONCURRENT_STREAMS", 2048),
+		H2CReadFrameKB:            clampInt(intEnv("H2C_READ_FRAME_KB", 64), 16, 16*1024),
+		H2CStreamBufferKB:         clampInt(intEnv("H2C_STREAM_BUFFER_KB", 1024), 64, 4095),
+		H2CConnectionBufferKB:     clampInt(intEnv("H2C_CONNECTION_BUFFER_KB", 2048), 64, 4095),
+		H2CDisableClientPriority:  boolEnv("H2C_DISABLE_CLIENT_PRIORITY", false),
+		ListenReusePort:           clampInt(intEnv("LISTEN_REUSEPORT", 1), 1, 64),
 		UsageHeaderSnapshots:      boolEnv("USAGE_HEADER_SNAPSHOTS", true),
 		LogRetentionDays:          retentionDays(),
 		LogCleanupTime:            parseCleanupTime(os.Getenv("LOG_CLEANUP_TIME")),
@@ -217,6 +239,17 @@ func nonNegativeIntEnv(name string, fallback int) int {
 		return fallback
 	}
 	return n
+}
+
+// clampInt keeps a parsed value inside the range the HTTP/2 stack accepts.
+func clampInt(value, minValue, maxValue int) int {
+	if value < minValue {
+		return minValue
+	}
+	if value > maxValue {
+		return maxValue
+	}
+	return value
 }
 
 // splitPrefixes parses a comma-separated path-prefix list, dropping blanks.

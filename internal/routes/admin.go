@@ -12,6 +12,7 @@ import (
 
 	"relay-api/internal/db"
 	"relay-api/internal/httperr"
+	"relay-api/internal/metrics"
 	"relay-api/internal/util"
 )
 
@@ -1302,6 +1303,12 @@ func (h *AdminResources) stats(w http.ResponseWriter, r *http.Request) {
 		"models":      modelRows,
 		"providers":   providerRows,
 		"api_configs": configRows,
+		"runtime": map[string]any{
+			"tunnel_active":          metrics.TunnelActive.Load(),
+			"copy_buffer_promotions": metrics.CopyBufferPromotions.Load(),
+			"usage_dropped":          db.DroppedUsage(),
+			"http2_errors":           metrics.HTTP2Errors(),
+		},
 	})
 }
 

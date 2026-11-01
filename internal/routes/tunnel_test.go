@@ -26,7 +26,7 @@ type tunnelHarness struct {
 	secrets *util.SecretBox
 }
 
-func newTunnelHarness(t *testing.T) tunnelHarness {
+func newTunnelHarness(t testing.TB) tunnelHarness {
 	t.Helper()
 	t.Setenv("DATABASE_PATH", filepath.Join(t.TempDir(), "gateway.db"))
 	t.Setenv("SECRET_KEY_FILE", filepath.Join(t.TempDir(), ".secret-key"))
@@ -49,7 +49,7 @@ func newTunnelHarness(t *testing.T) tunnelHarness {
 	mux := http.NewServeMux()
 	NewTunnelRoutes(secrets).Register(mux, "/free")
 	mux.HandleFunc("/", func(w http.ResponseWriter, _ *http.Request) { httperr.NotFound(w) })
-	return tunnelHarness{handler: middleware.RequestLog(mux), secrets: secrets}
+	return tunnelHarness{handler: middleware.RequestLog(mux, "/free"), secrets: secrets}
 }
 
 func TestTunnelPassthrough(t *testing.T) {
@@ -716,6 +716,38 @@ func TestTunnelCopyBufferSize(t *testing.T) {
 	}
 	if written != int64(len(payload)) || recorder.Body.Len() != len(payload) {
 		t.Fatalf("relayed %d bytes (recorder %d), want %d", written, recorder.Body.Len(), len(payload))
+	}
+}
+
+// TestTunnelStaticConfigHeaders covers the pre-rendered header path: a config
+// with no template placeholders is applied from the cache without building a
+// template context.
+func TestTunnelStaticConfigHeaders(t *testing.T) {
+	harness := newTunnelHarness(t)
+
+	seen := make(chan http.Header, 1)
+	mock := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		seen <- r.Header.Clone()
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer mock.Close()
+
+	headers := `{"X-Static":"fixed","X-Other":"also-fixed"}`
+	mustConfig(t, db.NewAPIConfig{
+		Name: "static", Method: "GET", URL: mock.URL,
+		Headers: &headers, StreamTimeoutMs: 15000, Route: "free", Enabled: true,
+	})
+
+	request := httptest.NewRequest(http.MethodGet, "/free/static", nil)
+	recorder := httptest.NewRecorder()
+	harness.handler.ServeHTTP(recorder, request)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", recorder.Code, recorder.Body.String())
+	}
+
+	upstream := <-seen
+	if upstream.Get("X-Static") != "fixed" || upstream.Get("X-Other") != "also-fixed" {
+		t.Fatalf("static config headers = %v", upstream)
 	}
 }
 

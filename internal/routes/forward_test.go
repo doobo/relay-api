@@ -225,7 +225,7 @@ func TestForward(t *testing.T) {
 	})
 }
 
-func mustConfig(t *testing.T, input db.NewAPIConfig) {
+func mustConfig(t testing.TB, input db.NewAPIConfig) {
 	t.Helper()
 	if _, err := db.CreateAPIConfig(input); err != nil {
 		t.Fatalf("create config %s: %v", input.Name, err)

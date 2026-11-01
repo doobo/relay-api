@@ -321,9 +321,7 @@ func (t *anthropicUsageTap) onEvent(event util.SSEEvent) {
 // writePassthroughHeaders copies the upstream response headers that are safe to
 // relay and stamps the gateway request id.
 func writePassthroughHeaders(w http.ResponseWriter, header http.Header, requestID string) {
-	for key, value := range util.FilterResponseHeaders(header) {
-		w.Header().Set(key, value)
-	}
+	util.CopyResponseHeaders(w.Header(), header)
 	w.Header().Set("X-Request-ID", requestID)
 }
 

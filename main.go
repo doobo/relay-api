@@ -22,6 +22,7 @@ import (
 	"relay-api/internal/httperr"
 	"relay-api/internal/ipacl"
 	"relay-api/internal/logging"
+	"relay-api/internal/metrics"
 	"relay-api/internal/middleware"
 	"relay-api/internal/router"
 	"relay-api/internal/routes"
@@ -159,15 +160,17 @@ func main() {
 	// and needs no separate H2C_PORT.
 	//
 	// XHTTP fans one client into many parallel streams, so the per-stream and
-	// per-connection receive windows are widened above the 1 MiB default to
-	// keep a high-BDP cross-region link from being throttled to window/RTT,
-	// and more concurrent streams are allowed per connection (default 250;
-	// H2C_MAX_CONCURRENT_STREAMS, default 2048). This limit is a
-	// connection-level SETTINGS value: it applies to new connections only, so a
-	// change needs a restart, and it is not per api_config. Streams beyond it
-	// are refused (REFUSED_STREAM), which a compliant client retries on another
-	// connection; each accepted stream may hold an upload buffer plus the
-	// relay's copy chunk, so raising it far has a memory cost.
+	// per-connection receive windows are tunable (H2C_STREAM_BUFFER_KB /
+	// H2C_CONNECTION_BUFFER_KB; the defaults keep the 1 MiB stream window and
+	// widen the connection window to 2 MiB) to keep a high-BDP cross-region
+	// link from being throttled to window/RTT, and more concurrent streams are
+	// allowed per connection (default 250; H2C_MAX_CONCURRENT_STREAMS, default
+	// 2048). This limit is a connection-level SETTINGS value: it applies to new
+	// connections only, so a change needs a restart, and it is not per
+	// api_config. Streams beyond it are refused (REFUSED_STREAM), which a
+	// compliant client retries on another connection; each accepted stream may
+	// hold an upload buffer plus the relay's copy chunk, so raising it far has a
+	// memory cost.
 	//
 	// ReadTimeout/WriteTimeout stay unset: both are total-duration limits and
 	// SSE plus /free tunnels are long-lived. IdleTimeout only reaps a
@@ -187,14 +190,16 @@ func main() {
 		MaxHeaderBytes: 64 << 10,
 		HTTP2: &http.HTTP2Config{
 			MaxConcurrentStreams:          cfg.H2CMaxConcurrentStreams,
-			MaxReadFrameSize:              64 << 10,
-			MaxReceiveBufferPerConnection: 2 << 20,
-			MaxReceiveBufferPerStream:     1 << 20,
+			MaxReadFrameSize:              cfg.H2CReadFrameKB << 10,
+			MaxReceiveBufferPerConnection: cfg.H2CConnectionBufferKB << 10,
+			MaxReceiveBufferPerStream:     cfg.H2CStreamBufferKB << 10,
 			WriteByteTimeout:              time.Duration(cfg.SendTimeoutMs) * time.Millisecond,
 			SendPingTimeout:               30 * time.Second,
 			PingTimeout:                   15 * time.Second,
+			CountError:                    metrics.NoteHTTP2Error,
 		},
-		Protocols: protocols,
+		DisableClientPriority: cfg.H2CDisableClientPriority,
+		Protocols:             protocols,
 	}
 
 	// Automatic log retention: run once at startup (so frequent restarts cannot
@@ -206,11 +211,26 @@ func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
-	errCh := make(chan error, 1)
-	go func() {
-		slog.Info("Relay-Api listening", "version", version, "addr", srv.Addr, "protocols", "http/1.1+h2c")
-		errCh <- srv.ListenAndServe()
-	}()
+	listeners, err := listenReusePort(srv.Addr, cfg.ListenReusePort)
+	if err != nil {
+		fatal("listen", "addr", srv.Addr, "error", err)
+	}
+	if cfg.ListenReusePort > 1 && len(listeners) == 1 {
+		slog.Warn("SO_REUSEPORT unsupported; using one listener", "requested", cfg.ListenReusePort)
+	}
+
+	errCh := make(chan error, len(listeners))
+	for _, listener := range listeners {
+		listener := listener
+		go func() {
+			if err := srv.Serve(listener); err != nil && !errors.Is(err, http.ErrServerClosed) {
+				errCh <- err
+			}
+		}()
+	}
+	slog.Info("Relay-Api listening",
+		"version", version, "addr", srv.Addr, "protocols", "http/1.1+h2c",
+		"listeners", len(listeners))
 
 	select {
 	case err := <-errCh:

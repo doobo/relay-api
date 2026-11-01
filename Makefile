@@ -50,6 +50,10 @@ cover:
 	$(GO) tool cover -html=coverage.out -o coverage.html
 	@echo "coverage.html 已生成"
 
+## bench: 运行 /free 转发基准（拷贝循环与完整 handler）
+bench:
+	$(GO) test ./internal/routes/ -run '^$$' -bench 'Benchmark(CopyAndFlush|TunnelHandle)' -benchmem
+
 ## vet: go vet 静态检查
 vet:
 	$(GO) vet ./...
