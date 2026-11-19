@@ -141,6 +141,7 @@ button.small {
 .form-inline {
   display: flex;
   flex-wrap: wrap;
+  align-items: center;
   gap: 8px;
 }
 
@@ -198,6 +199,30 @@ dialog select:focus {
 
 .form-inline input {
   width: 220px;
+}
+
+/* Usage has six short filters plus two buttons. Fixed 220px inputs wrapped
+   unevenly on laptop widths, so give the fields an even, wrapping grid and
+   keep the buttons grouped at their natural height instead of stretching to
+   the height of the row. */
+.usage-filters {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+}
+
+.usage-filters > * {
+  min-width: 0;
+}
+
+.usage-filters input,
+.usage-filters select {
+  width: 100%;
+}
+
+.usage-filters .filter-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
 }
 
 /* A hint inside a flex/grid form gets its own full-width row. */
@@ -484,6 +509,13 @@ dialog legend {
   overflow: hidden;
 }
 
+/* Never let auto table layout squeeze the columns when the panel is narrower
+   than their capped content: keep the natural width and let .table-wrap scroll
+   horizontally instead. */
+.usage-table {
+  min-width: max-content;
+}
+
 .usage-table .cell-clamp,
 .usage-table .cell-mono {
   display: inline-block;
@@ -509,13 +541,15 @@ dialog legend {
 .usage-table td:nth-child(9) :is(.cell-clamp, .cell-mono) { max-width: 80px; }
 .usage-table td:nth-child(10) :is(.cell-clamp, .cell-mono) { max-width: 90px; }
 
-/* The Details column stays pinned to the right while the capped columns
-   scroll underneath it. It needs an opaque surface so scrolled text cannot
-   show through the pinned cell. */
+/* The Action column stays pinned to the right while the wide columns scroll
+   underneath it. It needs an opaque surface so scrolled text cannot show
+   through the pinned cell, and a fixed min-width so the header never wraps. */
 .usage-table th:last-child,
 .usage-table td:last-child {
   position: sticky;
   right: 0;
+  min-width: 92px;
+  white-space: nowrap;
   background-color: var(--panel);
   box-shadow: -10px 0 14px -14px var(--shadow-lg);
 }
@@ -857,6 +891,12 @@ dialog h4 {
   /* Wide tables keep a horizontal scroll instead of squashing columns. */
   .table-wrap table:not([data-mobile="cards"]) {
     min-width: 560px;
+  }
+
+  /* Usage opts out of that fixed floor: its capped columns should keep their
+     full width and scroll, with the pinned Action column still reachable. */
+  .table-wrap table.usage-table {
+    min-width: max-content;
   }
 
   /* Opt-in card layout: every row becomes a labeled block. */
