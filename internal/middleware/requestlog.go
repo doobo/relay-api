@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"net/http"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"relay-api/internal/util"
@@ -21,6 +22,17 @@ func RequestID(ctx context.Context) string {
 	return id
 }
 
+// AccessLogConfig tunes RequestLog. The zero value keeps the historical
+// behaviour: every request except the configured prefixes is logged.
+type AccessLogConfig struct {
+	// SkipPrefixes are path prefixes that bypass the access log entirely.
+	SkipPrefixes []string
+	// Sample logs one in N successful (status < 400) requests. 1 (or less)
+	// logs every request. Failed requests are always logged, so a sampled log
+	// still contains every error and slow-path investigation starts from those.
+	Sample int
+}
+
 // RequestLog assigns (or propagates) X-Request-ID and logs every request on
 // completion, mirroring middleware/request-log.ts.
 //
@@ -33,6 +45,22 @@ func RequestID(ctx context.Context) string {
 // thousands of tiny XHTTP packet requests per client and logging each one is
 // pure overhead.
 func RequestLog(next http.Handler, skipPrefixes ...string) http.Handler {
+	return RequestLogWithConfig(next, AccessLogConfig{SkipPrefixes: skipPrefixes})
+}
+
+// RequestLogWithConfig is RequestLog with sampling and skip prefixes supplied
+// as one value. Sampling only applies to successful responses; 4xx/5xx are
+// always kept.
+func RequestLogWithConfig(next http.Handler, cfg AccessLogConfig) http.Handler {
+	skipPrefixes := cfg.SkipPrefixes
+	sample := cfg.Sample
+	if sample < 1 {
+		sample = 1
+	}
+	// Only successful requests go through the counter, so errors neither
+	// consume nor perturb the sample sequence.
+	var successSeq atomic.Uint64
+
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		logRequest := true
 		for _, prefix := range skipPrefixes {
@@ -65,14 +93,21 @@ func RequestLog(next http.Handler, skipPrefixes ...string) http.Handler {
 		start := time.Now()
 		next.ServeHTTP(rec, r.WithContext(ctx))
 
-		slog.Info("request",
-			"request_id", id,
-			"method", r.Method,
-			"path", r.URL.Path,
-			"status", rec.status,
-			"latency_ms", time.Since(start).Milliseconds(),
-			"client_ip", util.ClientIP(r),
-			"protocol", requestProtocol(r),
+		if rec.status < http.StatusBadRequest && sample > 1 &&
+			successSeq.Add(1)%uint64(sample) != 0 {
+			return
+		}
+
+		// LogAttrs avoids the []any allocation of the args form; the access log
+		// is the most frequent log site, so this matters under load.
+		slog.LogAttrs(ctx, slog.LevelInfo, "request",
+			slog.String("request_id", id),
+			slog.String("method", r.Method),
+			slog.String("path", r.URL.Path),
+			slog.Int("status", rec.status),
+			slog.Int64("latency_ms", time.Since(start).Milliseconds()),
+			slog.String("client_ip", util.ClientIP(r)),
+			slog.String("protocol", requestProtocol(r)),
 		)
 	})
 }

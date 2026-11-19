@@ -123,6 +123,9 @@ type Config struct {
 	// AccessLogSkipPrefixes are request path prefixes whose access-log line is
 	// suppressed (the tunnel is high-frequency by design).
 	AccessLogSkipPrefixes []string
+	// AccessLogSample logs one in N successful access-log lines; 4xx/5xx are
+	// always logged. 1 (the default) logs every request.
+	AccessLogSample int
 	// TunnelUsageSample records one in N successful /free requests; 1 records
 	// every request.
 	TunnelUsageSample int
@@ -191,7 +194,8 @@ func Load() Config {
 		UpstreamHeaderTimeoutMs:   intEnv("UPSTREAM_HEADER_TIMEOUT_MS", 30_000),
 		UpstreamBreakerThreshold:  nonNegativeIntEnv("UPSTREAM_BREAKER_THRESHOLD", 5),
 		UpstreamBreakerCooldownMs: intEnv("UPSTREAM_BREAKER_COOLDOWN_MS", 30_000),
-		AccessLogSkipPrefixes:     splitPrefixes(getenv("ACCESS_LOG_SKIP_PREFIXES", "/free")),
+		AccessLogSkipPrefixes:     splitPrefixes(getenv("ACCESS_LOG_SKIP_PREFIXES", "/free,/health")),
+		AccessLogSample:           intEnv("ACCESS_LOG_SAMPLE", 1),
 		TunnelUsageSample:         intEnv("TUNNEL_USAGE_SAMPLE", 10),
 		TunnelCopyBufferKB:        intEnv("TUNNEL_COPY_BUFFER_KB", 64),
 		H2CMaxConcurrentStreams:   intEnv("H2C_MAX_CONCURRENT_STREAMS", 2048),
@@ -281,12 +285,17 @@ func parseLogLevel(raw string) LogLevel {
 	switch strings.ToLower(strings.TrimSpace(raw)) {
 	case "debug":
 		return LogDebug
+	case "info":
+		return LogInfo
 	case "warn":
 		return LogWarn
 	case "error":
 		return LogError
 	default:
-		return LogInfo
+		// Usage is persisted in SQLite for auditing and the admin UI, so the
+		// console defaults to warnings only. Set LOG_LEVEL=info to get the
+		// per-request access log back.
+		return LogWarn
 	}
 }
 

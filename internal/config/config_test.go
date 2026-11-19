@@ -2,6 +2,22 @@ package config
 
 import "testing"
 
+func TestParseLogLevelDefault(t *testing.T) {
+	cases := map[string]LogLevel{
+		"":      LogWarn,
+		"bogus": LogWarn,
+		"debug": LogDebug,
+		"info":  LogInfo,
+		"WARN":  LogWarn,
+		"error": LogError,
+	}
+	for raw, want := range cases {
+		if got := parseLogLevel(raw); got != want {
+			t.Fatalf("parseLogLevel(%q) = %q, want %q", raw, got, want)
+		}
+	}
+}
+
 // TestLoadTunnelTuningKnobs locks the deployment knobs added for the relay
 // paths: the tunnel copy chunk, the per-connection HTTP/2 stream cap, and the
 // server-level idle/send timeouts.

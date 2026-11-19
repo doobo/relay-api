@@ -63,7 +63,7 @@ CGO_ENABLED=0 go build -trimpath -ldflags "-s -w" -o relay-api .
 | `ADMIN_DEFAULT_PASSWORD` | `admin123` | 首次启动创建的管理员初始密码 |
 | `ADMIN_SESSION_TTL_HOURS` | `24` | 管理后台会话有效期（小时） |
 | `ADMIN_LOGIN_RATE_LIMIT` | `10` | 单 IP 每分钟允许的失败登录次数，超出后该 IP 被限流 |
-| `LOG_LEVEL` | `info` | 日志级别：`debug` / `info` / `warn` / `error` |
+| `LOG_LEVEL` | `warn` | 日志级别：`debug` / `info` / `warn` / `error`。默认只输出警告和错误；设为 `info` 才输出启动信息和逐请求访问日志 |
 | `MAX_OPEN_FILES` | `65535` | 启动时把软 `RLIMIT_NOFILE` 提到该值（受硬上限约束；Linux/macOS 生效）。每条 `/free` 隧道占用 2 个 fd，默认软上限 1024 约 500 条隧道就会耗尽 |
 | `REQUEST_SIZE_LIMIT_MB` | `10` | `/v1/*` 与 `/open/*` 的请求体大小上限（MB）；`/free/*` 不受此限制 |
 | `REQUEST_TIMEOUT_MS` | `120000` | 非流式聊天请求与 `/open/*` 转发的上游超时（毫秒） |
@@ -76,7 +76,8 @@ CGO_ENABLED=0 go build -trimpath -ldflags "-s -w" -o relay-api .
 | `UPSTREAM_HEADER_TIMEOUT_MS` | `30000` | 流式请求等待上游响应头的上限（毫秒）；超时按上游超时处理并触发重试/熔断，`0` 关闭 |
 | `UPSTREAM_BREAKER_THRESHOLD` | `5` | 同一 Provider 连续失败多少次后熔断；`0` 关闭熔断 |
 | `UPSTREAM_BREAKER_COOLDOWN_MS` | `30000` | 熔断持续时间（毫秒），到期后放行一个探测请求 |
-| `ACCESS_LOG_SKIP_PREFIXES` | `/free` | 不写访问日志的路径前缀（逗号分隔）；请求 ID 仍会生成，设为空可记录所有请求 |
+| `ACCESS_LOG_SKIP_PREFIXES` | `/free,/health` | 不写访问日志的路径前缀（逗号分隔）；请求 ID 仍会生成，设为空可记录所有请求 |
+| `ACCESS_LOG_SAMPLE` | `1` | 成功请求（状态码 <400）的访问日志采样率，`N` 表示每 N 条记录 1 条；4xx/5xx 始终记录，`1` 表示全部记录。高 QPS 时设为 `10`~`50` 可显著减少 stdout 体积 |
 | `TUNNEL_USAGE_SAMPLE` | `10` | `/free` 成功请求写入用量日志的采样率，`N` 表示每 N 条记录 1 条；错误请求始终记录 |
 | `TUNNEL_COPY_BUFFER_KB` | `64` | `/free` 转发时可升级到的拷贝块大小（KiB，会被夹在 32 KiB~1 MiB 之间）。每条响应先使用 8 KiB 小块，只有读满小块时才升级到该值，因此空闲隧道只占 8 KiB；乘以并发隧道数即为常驻内存的大致上限，高带宽长连接部署可调到 `128`，配合 `GOMEMLIMIT` 使用 |
 | `H2C_MAX_CONCURRENT_STREAMS` | `2048` | 每条 h2c/h2 连接向客户端公告的最大并发流数（连接级 SETTINGS，仅对新连接生效，修改需重启）。它不是按 API Config 配置的：一条连接上所有配置共用同一上限；超限的流会被 `REFUSED_STREAM`，由客户端重试，且每条流都可能占用上传缓冲与拷贝块 |
@@ -239,6 +240,7 @@ make clean-dist                       # 删除 dist/
 - `CGO_ENABLED=0` 静态编译（SQLite 驱动为纯 Go 的 `modernc.org/sqlite`）
 - 持久化 `DATABASE_PATH` 指向的目录，并同时保留 `SECRET_KEY_FILE`，二者需一起备份
 - 访问日志经有界队列（8192 条）批量异步写入 stdout：攒到 64 KiB 或 **100 行**（先到者）即刷一批，最多等 200 ms；请求线程只入队，stdout 被阻塞时不会拖慢网站或 `/v1`，队列满的日志会被丢弃并在下一次落盘时输出 `dropped=N` 统计；请确保日志消费者（docker logs、面板、重定向文件）正常读取
+- 默认 `LOG_LEVEL=warn`，逐请求访问日志不再输出；需要排查请求时设 `LOG_LEVEL=info`，高 QPS 再配合 `ACCESS_LOG_SAMPLE`（例如 `20`）对成功请求采样，4xx/5xx 始终保留；`/health` 与 `/free` 默认不写访问日志（可用 `ACCESS_LOG_SKIP_PREFIXES` 覆盖）。stdout 由部署环境负责轮转，容器建议限制 `json-file` 的 `max-size`/`max-file`，systemd 部署可交给日志驱动或 `logrotate`，否则无论应用侧怎么采样文件都会一直增长
 - 仪表盘“今日”统计由内存计数器维护：启动时从 SQLite 预热一次，之后随用量写入实时递增，不会随着 `usage_logs` 变大而变慢；`/admin/stats` 默认不返回全量配置统计，脚本需要时加 `?full=1`。响应里的 `runtime` 字段暴露 `tunnel_active`、`copy_buffer_promotions`、`usage_dropped` 与 `http2_errors`，可直接判断隧道并发、拷贝块升级比例、用量队列丢弃和 HTTP/2 协议错误
 - 服务器层刻意不设置 `WriteTimeout`/`ReadTimeout`（二者都是总时长限制，长连接 SSE 与 `/free` 隧道需要），改用 `SERVER_IDLE_TIMEOUT_MS` 回收请求间的空闲连接、`SEND_TIMEOUT_MS` 处理写不动的客户端；处理器内再用 `STREAM_IDLE_TIMEOUT_MS` 控制上游空闲
 - 反向代理需允许长连接并关闭响应缓冲（Nginx 参考：`proxy_buffering off;`），否则流式响应会被缓冲

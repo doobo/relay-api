@@ -180,8 +180,11 @@ func main() {
 	protocols.SetHTTP1(true)
 	protocols.SetUnencryptedHTTP2(true)
 	srv := &http.Server{
-		Addr:              ":" + strconv.Itoa(cfg.Port),
-		Handler:           middleware.RequestLog(middleware.IPAccess(ipAccess)(mux), cfg.AccessLogSkipPrefixes...),
+		Addr: ":" + strconv.Itoa(cfg.Port),
+		Handler: middleware.RequestLogWithConfig(middleware.IPAccess(ipAccess)(mux), middleware.AccessLogConfig{
+			SkipPrefixes: cfg.AccessLogSkipPrefixes,
+			Sample:       cfg.AccessLogSample,
+		}),
 		ReadHeaderTimeout: 10 * time.Second,
 		IdleTimeout:       time.Duration(cfg.ServerIdleTimeoutMs) * time.Millisecond,
 		// Request headers are a few KiB in practice; 64 KiB leaves room for
@@ -273,12 +276,13 @@ func setupLogger(level config.LogLevel) *logging.AsyncWriter {
 	switch level {
 	case config.LogDebug:
 		slogLevel = slog.LevelDebug
-	case config.LogWarn:
-		slogLevel = slog.LevelWarn
+	case config.LogInfo:
+		slogLevel = slog.LevelInfo
 	case config.LogError:
 		slogLevel = slog.LevelError
 	default:
-		slogLevel = slog.LevelInfo
+		// Match config.parseLogLevel: warn is the process default.
+		slogLevel = slog.LevelWarn
 	}
 	writer := logging.NewAsyncWriter(os.Stdout, logging.Options{})
 	slog.SetDefault(slog.New(slog.NewTextHandler(writer, &slog.HandlerOptions{Level: slogLevel})))
